@@ -1,0 +1,71 @@
+# ==========================
+# Python 核心忽略规则
+# ==========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ==========================
+# 虚拟环境
+# ==========================
+venv/
+env/
+ENV/
+.venv/
+
+# ==========================
+# IDE 配置 (VS Code / JetBrains)
+# ==========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ==========================
+# 项目运行时数据 (AssetMonitor 特有)
+# ==========================
+# 日志
+logs/
+*.log
+
+# 扫描结果与数据
+data/
+results/
+output/
+checkpoints/
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+secbot_memory.db
+
+# ==========================
+# 敏感信息 & 凭证 (绝对禁止上传)
+# ==========================
+.env
+.env.*
+ceye_*.json
+proxy_*.json
+*.tmp
+*.bak
+*.cache

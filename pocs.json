@@ -1,0 +1,157 @@
+{
+  "pocs": [
+    {
+      "id": "check_springboot_actuator",
+      "name": "Spring Boot Actuator 敏感信息泄露",
+      "framework": "Spring Boot",
+      "type": "Information Disclosure",
+      "severity": "CRITICAL",
+      "confidence": 0.95,
+      "priority": 1,
+      "timeout": 3,
+      "description": "Spring Boot应用Actuator端点暴露敏感配置信息",
+      "enabled": true,
+      "implementations": ["check_springboot_actuator"]
+    },
+    {
+      "id": "check_log4j2_oob",
+      "name": "Log4j2 JNDI 远程代码执行",
+      "framework": "Spring Boot",
+      "type": "Remote Code Execution",
+      "severity": "CRITICAL",
+      "confidence": 0.90,
+      "priority": 1,
+      "timeout": 5,
+      "description": "Log4j2库存在JNDI注入漏洞，可导致RCE",
+      "enabled": true,
+      "requires_oob": true,
+      "implementations": ["check_log4j2_oob"]
+    },
+    {
+      "id": "check_shiro_auth_bypass",
+      "name": "Apache Shiro 认证绕过",
+      "framework": "Apache Shiro",
+      "type": "Authentication Bypass",
+      "severity": "CRITICAL",
+      "confidence": 0.85,
+      "priority": 2,
+      "timeout": 3,
+      "description": "Shiro存在特定版本的认证绕过漏洞",
+      "enabled": true,
+      "implementations": ["check_shiro_rce"]
+    },
+    {
+      "id": "check_nginx_directory_traversal",
+      "name": "Nginx 目录遍历",
+      "framework": "Nginx",
+      "type": "Directory Traversal",
+      "severity": "HIGH",
+      "confidence": 0.80,
+      "priority": 3,
+      "timeout": 3,
+      "description": "Nginx特定配置下存在目录遍历漏洞",
+      "enabled": false,
+      "implementations": ["check_nginx_directory_traversal"],
+      "note": "需要具体路径信息"
+    },
+    {
+      "id": "check_nginx_exposing_version",
+      "name": "Nginx 版本泄露",
+      "framework": "Nginx",
+      "type": "Information Disclosure",
+      "severity": "LOW",
+      "confidence": 0.95,
+      "priority": 4,
+      "timeout": 2,
+      "description": "Server header暴露Nginx版本号",
+      "enabled": true,
+      "implementations": ["check_nginx_version"]
+    },
+    {
+      "id": "check_iis_shortname_enumeration",
+      "name": "IIS 短名称枚举",
+      "framework": "IIS",
+      "type": "Information Disclosure",
+      "severity": "MEDIUM",
+      "confidence": 0.70,
+      "priority": 3,
+      "timeout": 5,
+      "description": "IIS存在8.3短名称信息泄露",
+      "enabled": false,
+      "implementations": ["check_iis_shortname"],
+      "note": "需要特殊工具支持"
+    },
+    {
+      "id": "check_iis_webdav",
+      "name": "IIS WebDAV远程代码执行",
+      "framework": "IIS",
+      "type": "Remote Code Execution",
+      "severity": "CRITICAL",
+      "confidence": 0.75,
+      "priority": 2,
+      "timeout": 3,
+      "description": "IIS WebDAV模块存在RCE漏洞(CVE-2017-9822等)",
+      "enabled": true,
+      "implementations": ["check_iis_webdav"],
+      "note": "需要启用WebDAV模块"
+    },
+    {
+      "id": "check_thinkphp_rce",
+      "name": "ThinkPHP 远程代码执行",
+      "framework": "ThinkPHP",
+      "type": "Remote Code Execution",
+      "severity": "CRITICAL",
+      "confidence": 0.85,
+      "priority": 2,
+      "timeout": 3,
+      "description": "ThinkPHP多个版本存在RCE漏洞",
+      "enabled": true,
+      "implementations": ["check_thinkphp_rce"]
+    },
+    {
+      "id": "check_jboss_deserialization",
+      "name": "JBoss 反序列化RCE",
+      "framework": "JBoss",
+      "type": "Remote Code Execution",
+      "severity": "CRITICAL",
+      "confidence": 0.80,
+      "priority": 2,
+      "timeout": 3,
+      "description": "JBoss EJBInvokerServlet存在反序列化漏洞",
+      "enabled": true,
+      "implementations": ["check_jboss_deserialization"]
+    }
+  ],
+  "frameworks": {
+    "Spring Boot": {
+      "priority": 1,
+      "confidence_baseline": 0.85,
+      "keywords": ["Whitelabel Error Page", "org.springframework", "timestamp"]
+    },
+    "Apache Shiro": {
+      "priority": 2,
+      "confidence_baseline": 0.80,
+      "keywords": ["rememberMe=", "shiro"]
+    },
+    "ThinkPHP": {
+      "priority": 2,
+      "confidence_baseline": 0.75,
+      "keywords": ["ThinkPHP", "think"]
+    },
+    "JBoss": {
+      "priority": 2,
+      "confidence_baseline": 0.75,
+      "keywords": ["JBoss", "jboss"]
+    },
+    "Nginx": {
+      "priority": 3,
+      "confidence_baseline": 0.70,
+      "keywords": ["nginx"]
+    },
+    "IIS": {
+      "priority": 3,
+      "confidence_baseline": 0.70,
+      "keywords": ["Microsoft-IIS"]
+    }
+  }
+}
