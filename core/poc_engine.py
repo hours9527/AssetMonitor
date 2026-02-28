@@ -1,15 +1,18 @@
 """
 POC引擎：漏洞验证框架
-支持优先级、超时控制、置信度评分
+支持优先级、超时控制、置信度评分、并发执行
 """
 from curl_cffi import requests
 import time
 import json
 import os
-from typing import Dict, List, Optional
+import concurrent.futures
+from typing import Dict, List, Optional, Callable, Any
 from datetime import datetime
+from abc import ABC, abstractmethod
 from config import Config
 from core.evasion import get_stealth_headers, smart_sleep
+from core.models import Vulnerability, Severity, VulnType
 from logger import get_logger
 
 # 引入OOB盲打引擎
@@ -17,6 +20,82 @@ from core.oob_engine import OOBEngine
 
 logger = get_logger("poc_engine")
 oob = OOBEngine()
+
+
+# ==========================================
+# BasePOC 基类：统一的POC执行框架
+# ==========================================
+class BasePOC(ABC):
+    """
+    POC基类：所有POC都应继承此类
+    提供超时控制、异常处理、置信度评分等统一框架
+    """
+
+    def __init__(self, name: str, severity: Severity, poc_type: VulnType, timeout: int = 5):
+        """
+        初始化POC
+
+        参数:
+            name: POC名称
+            severity: 漏洞严重等级
+            poc_type: 漏洞类型
+            timeout: 执行超时时间（秒）
+        """
+        self.name = name
+        self.severity = severity
+        self.poc_type = poc_type
+        self.timeout = timeout
+
+    @abstractmethod
+    def _check(self, url: str) -> Optional[Dict[str, Any]]:
+        """
+        实现具体的检查逻辑
+
+        参数:
+            url: 目标URL
+
+        返回:
+            如果检测到漏洞，返回漏洞信息字典；否则返回None
+        """
+        pass
+
+    def execute(self, url: str) -> Optional[Vulnerability]:
+        """
+        执行POC，带超时控制和异常处理
+
+        参数:
+            url: 目标URL
+
+        返回:
+            Vulnerability对象或None
+        """
+        try:
+            # 使用timeout避免某个POC卡住整个执行
+            result = self._execute_with_timeout(url)
+            if result:
+                return Vulnerability(
+                    vuln_name=result.get("vuln_name", self.name),
+                    payload_url=result.get("payload_url", url),
+                    severity=result.get("severity", self.severity),
+                    vuln_type=result.get("vuln_type", self.poc_type),
+                    discovered_at=result.get("discovered_at", datetime.now().isoformat()),
+                    confidence=result.get("confidence", 0.8)
+                )
+        except Exception as e:
+            logger.debug(f"  [-] {self.name} POC执行异常: {e}")
+
+        return None
+
+    def _execute_with_timeout(self, url: str) -> Optional[Dict[str, Any]]:
+        """使用线程超时执行check方法"""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._check, url)
+            try:
+                return future.result(timeout=self.timeout)
+            except concurrent.futures.TimeoutError:
+                logger.debug(f"  [-] {self.name} POC执行超时 ({self.timeout}s): {url}")
+                future.cancel()
+                return None
 
 
 # ==========================================
@@ -98,7 +177,7 @@ POC_REGISTRY = _load_registry_from_json()
 # ==========================================
 # POC 实现函数
 # ==========================================
-def check_springboot_actuator(url: str) -> Optional[Dict]:
+def check_springboot_actuator(url: str) -> Optional[Vulnerability]:
     """Spring Boot Actuator 敏感信息泄露"""
     target_url = f"{url.rstrip('/')}/actuator/env"
     try:
@@ -112,20 +191,21 @@ def check_springboot_actuator(url: str) -> Optional[Dict]:
             impersonate="chrome120"
         )
         if res.status_code == 200 and "activeProfiles" in res.text:
-            return {
-                "vuln_name": "Spring Boot Actuator 敏感信息泄露",
-                "payload_url": target_url,
-                "severity": "CRITICAL",
-                "type": "Information Disclosure",
-                "discovered_at": datetime.now().isoformat()
-            }
+            return Vulnerability(
+                vuln_name="Spring Boot Actuator 敏感信息泄露",
+                payload_url=target_url,
+                severity=Severity.CRITICAL,
+                vuln_type=VulnType.INFORMATION_DISCLOSURE,
+                discovered_at=datetime.now().isoformat(),
+                confidence=0.95
+            )
     except Exception as e:
         logger.debug(f"  [-] Spring Boot Actuator POC失败: {e}")
 
     return None
 
 
-def check_log4j2_oob(url: str) -> Optional[Dict]:
+def check_log4j2_oob(url: str) -> Optional[Vulnerability]:
     """Log4j2 JNDI 远程代码执行 (OOB检测)"""
     if not Config.OOB_ENABLED:
         return None
@@ -151,20 +231,21 @@ def check_log4j2_oob(url: str) -> Optional[Dict]:
         time.sleep(min(Config.OOB_TIMEOUT, 15))
 
         if oob.verify(unique_id):
-            return {
-                "vuln_name": "Log4j2 JNDI 远程代码执行",
-                "payload_url": f"Header Injection: {payload}",
-                "severity": "CRITICAL",
-                "type": "Remote Code Execution",
-                "discovered_at": datetime.now().isoformat()
-            }
+            return Vulnerability(
+                vuln_name="Log4j2 JNDI 远程代码执行",
+                payload_url=f"Header Injection: {payload}",
+                severity=Severity.CRITICAL,
+                vuln_type=VulnType.REMOTE_CODE_EXECUTION,
+                discovered_at=datetime.now().isoformat(),
+                confidence=0.90
+            )
     except Exception as e:
         logger.debug(f"  [-] Log4j2 OOB POC失败: {e}")
 
     return None
 
 
-def check_nginx_version(url: str) -> Optional[Dict]:
+def check_nginx_version(url: str) -> Optional[Vulnerability]:
     """Nginx 版本信息泄露检测"""
     try:
         smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
@@ -179,20 +260,21 @@ def check_nginx_version(url: str) -> Optional[Dict]:
 
         server_header = res.headers.get('Server', '')
         if 'nginx' in server_header.lower():
-            return {
-                "vuln_name": f"Nginx {server_header} 版本泄露",
-                "payload_url": url,
-                "severity": "LOW",
-                "type": "Information Disclosure",
-                "discovered_at": datetime.now().isoformat()
-            }
+            return Vulnerability(
+                vuln_name=f"Nginx {server_header} 版本泄露",
+                payload_url=url,
+                severity=Severity.LOW,
+                vuln_type=VulnType.INFORMATION_DISCLOSURE,
+                discovered_at=datetime.now().isoformat(),
+                confidence=0.85
+            )
     except Exception as e:
         logger.debug(f"  [-] Nginx版本检测失败: {e}")
 
     return None
 
 
-def check_iis_webdav(url: str) -> Optional[Dict]:
+def check_iis_webdav(url: str) -> Optional[Vulnerability]:
     """IIS WebDAV RCE检测"""
     # 简化版本：检测OPTIONS方法是否暴露WebDAV
     try:
@@ -213,20 +295,21 @@ def check_iis_webdav(url: str) -> Optional[Dict]:
         dav_header = res.headers.get('DAV', '')
 
         if 'PROPFIND' in allow_header or dav_header:
-            return {
-                "vuln_name": "IIS WebDAV 可能存在RCE漏洞",
-                "payload_url": url,
-                "severity": "HIGH",
-                "type": "Potential RCE",
-                "discovered_at": datetime.now().isoformat()
-            }
+            return Vulnerability(
+                vuln_name="IIS WebDAV 可能存在RCE漏洞",
+                payload_url=url,
+                severity=Severity.HIGH,
+                vuln_type=VulnType.REMOTE_CODE_EXECUTION,
+                discovered_at=datetime.now().isoformat(),
+                confidence=0.75
+            )
     except Exception as e:
         logger.debug(f"  [-] IIS WebDAV检测失败: {e}")
 
     return None
 
 
-def check_thinkphp_rce(url: str) -> Optional[Dict]:
+def check_thinkphp_rce(url: str) -> Optional[Vulnerability]:
     """ThinkPHP RCE检测（简化版）"""
     # 这是简化实现，实际需要特定payload
     try:
@@ -249,20 +332,21 @@ def check_thinkphp_rce(url: str) -> Optional[Dict]:
             )
 
             if res.status_code == 200 and 'thinkphp' in res.text.lower():
-                return {
-                    "vuln_name": "ThinkPHP 可能存在RCE漏洞",
-                    "payload_url": test_url,
-                    "severity": "HIGH",
-                    "type": "Potential RCE",
-                    "discovered_at": datetime.now().isoformat()
-                }
+                return Vulnerability(
+                    vuln_name="ThinkPHP 可能存在RCE漏洞",
+                    payload_url=test_url,
+                    severity=Severity.HIGH,
+                    vuln_type=VulnType.REMOTE_CODE_EXECUTION,
+                    discovered_at=datetime.now().isoformat(),
+                    confidence=0.70
+                )
     except Exception as e:
         logger.debug(f"  [-] ThinkPHP RCE检测失败: {e}")
 
     return None
 
 
-def check_jboss_deserialization(url: str) -> Optional[Dict]:
+def check_jboss_deserialization(url: str) -> Optional[Vulnerability]:
     """JBoss 反序列化RCE检测"""
     try:
         smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
@@ -287,15 +371,16 @@ def check_jboss_deserialization(url: str) -> Optional[Dict]:
                 )
 
                 if res.status_code == 200:
-                    return {
-                        "vuln_name": f"JBoss {path} 端点暴露",
-                        "payload_url": test_url,
-                        "severity": "HIGH",
-                        "type": "Information Disclosure / Potential RCE",
-                        "discovered_at": datetime.now().isoformat()
-                    }
-            except:
-                pass
+                    return Vulnerability(
+                        vuln_name=f"JBoss {path} 端点暴露",
+                        payload_url=test_url,
+                        severity=Severity.HIGH,
+                        vuln_type=VulnType.REMOTE_CODE_EXECUTION,
+                        discovered_at=datetime.now().isoformat(),
+                        confidence=0.80
+                    )
+            except Exception as e:
+                logger.debug(f"[*] JBoss检测失败 ({test_url}): {type(e).__name__}")
     except Exception as e:
         logger.debug(f"  [-] JBoss检测失败: {e}")
 
@@ -305,12 +390,20 @@ def check_jboss_deserialization(url: str) -> Optional[Dict]:
 # ==========================================
 # POC 管理和执行函数
 # ==========================================
-def run_pocs(url: str, fingerprints: List[str]) -> List[Dict]:
+def run_pocs(url: str, fingerprints: List[str]) -> List[Vulnerability]:
     """
-    按优先级执行POC
+    按优先级执行POC（并发执行）
     基于指纹识别结果执行对应的漏洞检测
+    使用ThreadPoolExecutor实现POC并行执行，提高扫描效率
+
+    参数:
+        url: 目标URL
+        fingerprints: 指纹识别结果列表
+
+    返回:
+        发现的漏洞列表
     """
-    discovered_vulns = []
+    discovered_vulns: List[Vulnerability] = []
     executed_pocs = set()  # 避免重复执行同一个POC
 
     # 按优先级排序指纹
@@ -318,6 +411,9 @@ def run_pocs(url: str, fingerprints: List[str]) -> List[Dict]:
         fingerprints,
         key=lambda fp: POC_REGISTRY.get(fp, {}).get("priority", 999)
     )
+
+    # 用于并发执行的POC任务队列
+    poc_tasks: List[tuple] = []  # (poc_name, poc_func, poc_meta)
 
     for fp in sorted_fps:
         if fp not in POC_REGISTRY:
@@ -338,22 +434,66 @@ def run_pocs(url: str, fingerprints: List[str]) -> List[Dict]:
 
             executed_pocs.add(poc_name)
 
-            try:
-                # 动态获取POC函数
-                poc_func = globals().get(poc_name)
-                if not poc_func:
-                    logger.warning(f"      [-] POC函数不存在: {poc_name}")
-                    continue
+            # 获取POC函数
+            poc_func = globals().get(poc_name)
+            if not poc_func:
+                logger.warning(f"      [-] POC函数不存在: {poc_name}")
+                continue
 
-                result = poc_func(url)
+            # 添加到任务队列（不立即执行）
+            poc_tasks.append((poc_name, poc_func, poc_meta))
+
+    # ===== 并发执行所有POC任务 =====
+    max_workers = min(len(poc_tasks), Config.THREADS_DEFAULT // 2)  # 不超过总线程数的一半
+    if max_workers < 1:
+        max_workers = 1
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有POC任务
+        futures = {
+            executor.submit(_execute_single_poc, url, poc_name, poc_func, poc_meta['timeout'] if 'timeout' in poc_meta else 5): (poc_name, poc_meta)
+            for poc_name, poc_func, poc_meta in poc_tasks
+        }
+
+        # 收集执行结果
+        for future in concurrent.futures.as_completed(futures):
+            poc_name, poc_meta = futures[future]
+            try:
+                result = future.result()
                 if result:
                     discovered_vulns.append(result)
                     confidence = poc_meta.get("confidence", 0.8)
                     logger.info(
-                        f"      [!!!] 成功验证: {result['vuln_name']} "
+                        f"      [!!!] 成功验证: {result.vuln_name} "
                         f"(置信度: {confidence*100:.0f}%)"
                     )
             except Exception as e:
                 logger.debug(f"      [-] POC执行异常 {poc_name}: {e}")
 
     return discovered_vulns
+
+
+def _execute_single_poc(url: str, poc_name: str, poc_func: Callable, timeout: int) -> Optional[Vulnerability]:
+    """
+    执行单个POC，带超时控制
+
+    参数:
+        url: 目标URL
+        poc_name: POC名称
+        poc_func: POC函数
+        timeout: 超时时间
+
+    返回:
+        Vulnerability对象或None
+    """
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(poc_func, url)
+            result = future.result(timeout=timeout)
+            return result
+    except concurrent.futures.TimeoutError:
+        logger.debug(f"  [-] {poc_name} POC执行超时 ({timeout}s)")
+        return None
+    except Exception as e:
+        logger.debug(f"  [-] {poc_name} POC执行异常: {e}")
+        return None

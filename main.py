@@ -8,29 +8,39 @@ import time
 import argparse
 import json
 import csv
+from typing import Dict, List, Any
 from datetime import datetime
-from pathlib import Path
 
 from config import Config
 from logger import get_logger
 from checkpoint import CheckpointManager, DedupManager
 from core.database import init_database, get_db_manager  # 新增数据库导入
+from core.di_container import initialize_di_container
 from core.subdomain import get_subdomains
 from core.httpx_probe import batch_probe
+from core.models import Asset, Vulnerability
 from core.notify import send_alert
 
 logger = get_logger("main")
 
 
-def create_output_directory():
+def create_output_directory() -> None:
     """创建输出目录"""
     os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
 
 
-def export_results(results: dict, target_domain: str, scan_id: str) -> dict:
+def export_results(results: Dict[str, Any], target_domain: str, scan_id: str) -> Dict[str, str]:
     """
     导出扫描结果为多种格式
     支持: TXT, JSON, CSV
+
+    参数:
+        results: 扫描结果字典
+        target_domain: 目标域名
+        scan_id: 扫描ID
+
+    返回:
+        导出文件路径字典
     """
     exported = {}
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -54,21 +64,21 @@ def export_results(results: dict, target_domain: str, scan_id: str) -> dict:
                 f.write("【存活资产列表】\n")
                 f.write("-" * 70 + "\n")
                 for asset in results['alive_assets']:
-                    f.write(f"URL: {asset['url']}\n")
-                    f.write(f"  状态码: {asset['status']}\n")
-                    f.write(f"  指纹: {asset['fingerprint']}\n")
-                    f.write(f"  置信度: {asset.get('confidence', 0)*100:.1f}%\n")
-                    f.write(f"  标题: {asset.get('title', '无')}\n")
-                    f.write(f"  漏洞数: {len(asset.get('vulns', []))}\n\n")
+                    f.write(f"URL: {asset.url}\n")
+                    f.write(f"  状态码: {asset.status}\n")
+                    f.write(f"  指纹: {asset.fingerprint}\n")
+                    f.write(f"  置信度: {asset.confidence*100:.1f}%\n")
+                    f.write(f"  标题: {asset.title}\n")
+                    f.write(f"  漏洞数: {len(asset.vulns)}\n\n")
 
                 if results['vulnerabilities']:
                     f.write("【漏洞汇总】\n")
                     f.write("-" * 70 + "\n")
                     for vuln in results['vulnerabilities']:
-                        f.write(f"类型: {vuln['vuln_name']}\n")
-                        f.write(f"  严重等级: {vuln.get('severity', 'UNKNOWN')}\n")
-                        f.write(f"  目标: {vuln.get('url', 'N/A')}\n")
-                        f.write(f"  发现时间: {vuln.get('discovered_at', 'N/A')}\n\n")
+                        f.write(f"类型: {vuln.vuln_name}\n")
+                        f.write(f"  严重等级: {vuln.severity.value}\n")
+                        f.write(f"  目标: {vuln.payload_url}\n")
+                        f.write(f"  发现时间: {vuln.discovered_at}\n\n")
 
             logger.info(f"  [✓] TXT导出成功: {txt_file}")
             exported["txt"] = txt_file
@@ -111,12 +121,12 @@ def export_results(results: dict, target_domain: str, scan_id: str) -> dict:
 
                 for asset in results['alive_assets']:
                     writer.writerow({
-                        'url': asset['url'],
-                        'status': asset['status'],
-                        'fingerprint': asset['fingerprint'],
-                        'confidence': f"{asset.get('confidence', 0)*100:.1f}%",
-                        'title': asset.get('title', ''),
-                        'vulnerabilities': len(asset.get('vulns', []))
+                        'url': asset.url,
+                        'status': asset.status,
+                        'fingerprint': asset.fingerprint,
+                        'confidence': f"{asset.confidence*100:.1f}%",
+                        'title': asset.title,
+                        'vulnerabilities': len(asset.vulns)
                     })
 
             logger.info(f"  [✓] CSV导出成功: {csv_file}")
@@ -127,7 +137,7 @@ def export_results(results: dict, target_domain: str, scan_id: str) -> dict:
     return exported
 
 
-def main():
+def main() -> None:
     """主函数"""
     parser = argparse.ArgumentParser(
         description="企业级资产暴露面自动化巡航系统 v2.1 (无人值守版)",
@@ -186,10 +196,10 @@ def main():
 
     # 模式1: 启动Web服务器
     if args.server:
-        from soar_engine import app, init_db
-        print(f"[*] 正在启动可视化大屏...")
-        print(f"[*] 请访问: http://127.0.0.1:{args.port}")
-        init_db()
+        from soar_engine import app
+        logger.info("[*] 正在启动可视化大屏...")
+        logger.info(f"[*] 请访问: http://127.0.0.1:{args.port}")
+        initialize_di_container()
         app.run(host='0.0.0.0', port=args.port)
         return
 
@@ -215,17 +225,21 @@ def main():
     threads = args.threads
     enable_checkpoint = Config.CHECKPOINT_ENABLED and not args.no_checkpoint
 
-    # ===== 初始化数据库（新增）=====
+    # ===== 初始化数据库（通过DI容器）=====
     try:
         logger.info("[*] 初始化数据库连接池...")
-        db_manager = init_database()
-        logger.info("[✓] 数据库初始化成功")
+        initialize_di_container()
+        db_manager = get_db_manager()
+        if db_manager:
+            logger.info("[✓] 数据库初始化成功")
+        else:
+            logger.warning("[!] 数据库初始化失败，仅使用文件输出")
     except Exception as e:
         logger.warning(f"[!] 数据库初始化失败: {e}，仅使用文件输出")
         db_manager = None
 
     # ===== 打印启动信息 =====
-    print(f"""
+    startup_info = f"""
 ╔════════════════════════════════════════════════════════════╗
 ║  AssetMonitor v2.1 - 企业级资产巡航引擎                    ║
 ║  自动化无人值守资产发现 & 漏洞检测系统                     ║
@@ -240,7 +254,8 @@ def main():
   配置文件: {args.config or 'config.yaml'}
   输出格式: {', '.join(Config.OUTPUT_FORMATS)}
 
-""")
+"""
+    logger.info(startup_info)
 
     # ===== 初始化 =====
     create_output_directory()
@@ -288,13 +303,10 @@ def main():
         checkpoint.mark_stage_completed("probing")
 
     # ===== 漏洞汇总 =====
-    all_vulnerabilities = []
+    all_vulnerabilities: List[Vulnerability] = []
     for asset in alive_assets:
-        for vuln in asset.get('vulns', []):
-            all_vulnerabilities.append({
-                **vuln,
-                "url": asset['url']
-            })
+        for vuln in asset.vulns:
+            all_vulnerabilities.append(vuln)
             if enable_checkpoint:
                 checkpoint.add_vulnerability(vuln)
 

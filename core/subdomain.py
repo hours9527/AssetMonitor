@@ -6,6 +6,7 @@ from typing import Set, List, Dict
 from datetime import datetime
 from config import Config
 from logger import get_logger
+from core.evasion import get_stealth_headers
 
 logger = get_logger("subdomain")
 
@@ -14,9 +15,8 @@ class SubdomainCollector:
     """企业级多源子域名收集器"""
 
     def __init__(self):
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        # 使用evasion模块的综合请求头，替代简单的User-Agent
+        self.headers = get_stealth_headers()
         self.sources_result = {}
 
     def collect(self, domain: str) -> List[str]:
@@ -139,7 +139,8 @@ class SubdomainCollector:
         socket.setdefaulttimeout(dns_timeout)
 
         # P3-06: 使用ThreadPoolExecutor并行验证DNS，加速20个域的验证
-        dns_workers = min(20, len(subdomains))  # 最多20个并发
+        # 性能优化：动态调整DNS并发数，最多THREADS_DEFAULT个
+        dns_workers = min(max(20, Config.THREADS_DEFAULT), len(subdomains))
         verified = set()
         failed_count = 0
         timeout_count = 0
@@ -205,7 +206,23 @@ class SubdomainCollector:
 # 兼容旧版本 API
 def get_subdomains(domain: str) -> List[str]:
     """
-    向后兼容函数
+    获取域名的所有子域名（多源聚合）
+
+    Args:
+        domain: 目标主域名 (e.g., "example.com")
+
+    Returns:
+        子域名列表
+
+    Note:
+        - 使用多个数据源进行聚合（DNS、HTTP、爬虫等）
+        - 自动去重和验证
+        - 返回已过滤和验证的子域名
+
+    Example:
+        >>> subdomains = get_subdomains("example.com")
+        >>> isinstance(subdomains, list)
+        True
     """
     collector = SubdomainCollector()
     return collector.collect(domain)

@@ -2,6 +2,10 @@ import requests
 import random
 import string
 import time
+from logger import get_logger
+
+logger = get_logger("oob_engine")
+
 
 class OOBEngine:
     def __init__(self):
@@ -27,7 +31,7 @@ class OOBEngine:
         """
         if self.api_token == "YOUR_CEYE_TOKEN":
             # 如果没配置真实 Token，直接返回 False 防报错
-            print("    [OOB] 未配置真实 Ceye API，跳过无回显漏洞验证。")
+            logger.warning("[OOB] 未配置真实 Ceye API，跳过无回显漏洞验证。")
             return False
 
         api_url = f"http://api.ceye.io/v1/records?token={self.api_token}&type=dns&filter={unique_id}"

@@ -51,12 +51,17 @@ class Config:
     WILDCARD_THRESHOLD = 500  # content_length偏差阈值
     MAX_REDIRECTS = 5  # 最大重定向跟踪数
     CERTIFICATE_INFO_ENABLED = True  # 提取证书信息
+    VERIFY_SSL_CERTIFICATE = os.getenv("VERIFY_SSL", "false").lower() == "true"  # 验证SSL证书（默认关闭，可在.env开启）
 
     # ==================== POC引擎 ====================
     POC_TIMEOUT = int(os.getenv("POC_TIMEOUT", "3"))
     POC_CACHE_HOURS = 24  # POC结果缓存（避免重复测试）
     VULN_DEDUP_HOURS = 1  # 漏洞去重时间窗口
     POC_MAX_WORKERS = 3  # POC并发数
+
+    # ==================== 熔断器配置 ====================
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv("CIRCUIT_BREAKER_THRESHOLD", "5"))  # 失败多少次后打开
+    CIRCUIT_BREAKER_TIMEOUT = int(os.getenv("CIRCUIT_BREAKER_TIMEOUT", "300"))  # 熔断后多久尝试恢复（秒）
 
     # ==================== 反检测配置 ====================
     ENABLE_PROXY = os.getenv("ENABLE_PROXY", "false").lower() == "true"
@@ -74,12 +79,12 @@ class Config:
     OOB_ENABLED = os.getenv("OOB_ENABLED", "false").lower() == "true"
     OOB_PLATFORM = os.getenv("OOB_PLATFORM", "ceye")  # ceye, dnslog, http-callbacks
     OOB_TIMEOUT = int(os.getenv("OOB_TIMEOUT", "15"))
-    CEYE_TOKEN = os.getenv("CEYE_TOKEN", "YOUR_CEYE_TOKEN")
-    CEYE_DOMAIN = os.getenv("CEYE_DOMAIN", "YOUR_IDENTIFIER.ceye.io")
+    CEYE_TOKEN = os.getenv("CEYE_TOKEN", "")
+    CEYE_DOMAIN = os.getenv("CEYE_DOMAIN", "")
 
     # ==================== 数据库配置 ====================
     DB_FILE = os.getenv("DB_FILE", "secbot_memory.db")
-    DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+    DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", str(max(10, THREADS_DEFAULT // 2))))  # 动态调整：至少10，约为线程数的一半
     DB_TIMEOUT = int(os.getenv("DB_TIMEOUT", "10"))
 
     # ==================== 通知配置 ====================
@@ -170,8 +175,21 @@ def get_config(key: str, default: Any = None) -> Any:
 
 
 if __name__ == "__main__":
-    # 打印当前配置
+    # 打印当前配置（敏感信息白名单方式）
     print("当前配置:")
+    SAFE_KEYS = {
+        'PROJECT_NAME', 'VERSION', 'THREADS_DEFAULT', 'REQUEST_TIMEOUT',
+        'WILDCARD_TEST_COUNT', 'WILDCARD_THRESHOLD', 'MAX_REDIRECTS',
+        'POC_TIMEOUT', 'POC_CACHE_HOURS', 'VULN_DEDUP_HOURS', 'POC_MAX_WORKERS',
+        'ENABLE_PROXY', 'USER_AGENT_POOL_SIZE', 'OOB_ENABLED', 'OOB_PLATFORM', 'OOB_TIMEOUT',
+        'DB_FILE', 'DB_POOL_SIZE', 'DB_TIMEOUT',
+        'NOTIFY_ENABLED', 'NOTIFY_CHANNELS', 'SMTP_POOL_SIZE',
+        'NOTIFY_DEDUP_HOURS', 'NOTIFY_RATE_LIMIT', 'DEDUP_EXPIRE_DAYS',
+        'OUTPUT_DIR', 'OUTPUT_FORMATS', 'HTML_REPORT_ENABLED',
+        'LOG_LEVEL', 'LOG_DIR', 'LOG_MAX_BYTES', 'LOG_BACKUP_COUNT',
+        'CHECKPOINT_ENABLED', 'CHECKPOINT_DIR', 'CHECKPOINT_AUTO_SAVE_INTERVAL',
+        'DRY_RUN', 'DEBUG'
+    }
     for key, value in Config.to_dict().items():
-        if not any(x in key for x in ['PASSWORD', 'TOKEN', 'SECRET']):
+        if key in SAFE_KEYS:
             print(f"  {key}: {value}")

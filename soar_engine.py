@@ -13,25 +13,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 app = Flask(__name__)
 
 # ==========================================
-# ⚙️ 全局配置与数据库 (P3-07：集成连接池)
+# ⚙️ 依赖注入与配置 (改用DI容器替代全局变量)
 # ==========================================
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "在此替换为你的_BOT_TOKEN")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID", "在此替换为你的_CHAT_ID")
+from core.di_container import initialize_di_container, DIContainer
+from logger import get_logger
 
-# P3-07: 使用共享的数据库连接池而不是直接连接
-db_manager = None
+logger = get_logger(__name__)
 
-def init_db():
-    """P3-07: 初始化数据库（使用连接池）"""
-    global db_manager
-    try:
-        from core.database import init_database
-        db_manager = init_database()
-        print("[✓] 数据库连接池初始化成功 (P3-07)")
-        return True
-    except Exception as e:
-        print(f"[!] 数据库初始化失败，使用快速模式: {e}")
-        return False
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
+
+
+def get_db_manager():
+    """从DI容器获取数据库管理器"""
+    # DI容器是单例，直接使用
+    container = DIContainer()
+    return container.get('db') if container.has('db') else None
 
 def send_tg_message(text):
     if TG_BOT_TOKEN.startswith("在此替换") or TG_CHAT_ID.startswith("在此替换"):
@@ -40,16 +37,16 @@ def send_tg_message(text):
     requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
 
 def playbook_critical_vuln(asset_url, target_domain, vuln):
-    print(f"\n[🔥] 触发漏洞响应剧本 -> 目标: {asset_url}")
+    logger.info(f"[🔥] 触发漏洞响应剧本 -> 目标: {asset_url}")
     alert_msg = f"🚨 **SecBot 新增漏洞告警** 🚨\n\n**资产**: `{asset_url}`\n**漏洞**: 💥 {vuln['vuln_name']}\n**路径**: [点击验证]({vuln['payload_url']})"
     send_tg_message(alert_msg)
 
 def process_recon_intel(domain, assets):
     """P3-07: 处理侦察情报（使用数据库连接池）"""
-    global db_manager
+    db_manager = get_db_manager()
 
     if not db_manager:
-        print("[!] 数据库未初始化，跳过数据保存")
+        logger.warning("[!] 数据库未初始化，跳过数据保存")
         return 0
 
     new_vulns_count = 0
@@ -61,7 +58,7 @@ def process_recon_intel(domain, assets):
         try:
             db_manager.add_asset(url, domain, status, fingerprint, 0.8, "")
         except Exception as e:
-            print(f"[-] 添加资产失败: {e}")
+            logger.error(f"[-] 添加资产失败: {e}")
 
         # 处理漏洞
         for v in vulns:
@@ -80,7 +77,7 @@ def process_recon_intel(domain, assets):
                 new_vulns_count += 1
                 playbook_critical_vuln(url, domain, v)
             except Exception as e:
-                print(f"[-] 添加漏洞失败: {e}")
+                logger.error(f"[-] 添加漏洞失败: {e}")
 
     return new_vulns_count
 
@@ -281,7 +278,7 @@ HTML_TEMPLATE = """
 @app.route('/', methods=['GET'])
 def dashboard():
     """P3-07: Web UI 路由：从数据库读取数据并渲染HTML大屏（使用连接池）"""
-    global db_manager
+    db_manager = get_db_manager()
 
     total_assets = 0
     total_vulns = 0
@@ -334,7 +331,7 @@ def dashboard():
                     top_asset_counts.append(row[1])
 
         except Exception as e:
-            print(f"[-] 数据库查询失败: {e}")
+            logger.error(f"[-] 数据库查询失败: {e}")
 
     # 将数据注入到 HTML 模板中并渲染
     return render_template_string(
@@ -347,5 +344,5 @@ def dashboard():
 # 🏁 引擎启动
 # ==========================================
 if __name__ == '__main__':
-    init_db()
+    initialize_di_container()
     app.run(host='0.0.0.0', port=5000, debug=False)

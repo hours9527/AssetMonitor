@@ -193,8 +193,8 @@ class SMTPPool:
         for conn in self.connections:
             try:
                 conn.quit()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"[*] 关闭SMTP连接异常: {type(e).__name__}")
         self.connections.clear()
         self.available.clear()
 

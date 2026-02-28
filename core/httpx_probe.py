@@ -12,11 +12,12 @@ import string
 import time
 import threading
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
 
+from datetime import datetime, timedelta
 from core.evasion import get_stealth_headers, smart_sleep
 from core.proxy_manager import get_random_proxy
 from core.poc_engine import run_pocs
+from core.models import Asset, Vulnerability
 from config import Config
 from logger import get_logger
 
@@ -30,18 +31,23 @@ logger = get_logger("httpx_probe")
 class CircuitBreaker:
     """P3-08: Circuit Breaker 防止重复请求失败的端点"""
 
-    def __init__(self, failure_threshold: int = 5, timeout: int = 300):
+    def __init__(self, failure_threshold: int = None, timeout: int = None):
         """
         初始化Circuit Breaker
-        failure_threshold: 失败多少次后打开熔断器 (默认5次)
-        timeout: 熔断后多少秒尝试恢复 (默认300秒)
+        failure_threshold: 失败多少次后打开熔断器 (默认从Config读取)
+        timeout: 熔断后多少秒尝试恢复 (默认从Config读取)
         """
-        self.failure_threshold = failure_threshold
-        self.timeout = timeout
+        self.failure_threshold = failure_threshold or Config.CIRCUIT_BREAKER_FAILURE_THRESHOLD
+        self.timeout = timeout or Config.CIRCUIT_BREAKER_TIMEOUT
         self.circuits = {}  # {url: {'failures': int, 'last_failure': timestamp, 'state': 'closed'|'open'|'half_open'}}
 
-    def record_failure(self, url: str):
-        """记录一次失败"""
+    def record_failure(self, url: str) -> None:
+        """
+        记录一次失败，并在失败次数达到阈值后打开熔断器
+
+        Args:
+            url: 失败的URL
+        """
         if url not in self.circuits:
             self.circuits[url] = {'failures': 0, 'last_failure': None, 'state': 'closed'}
 
@@ -53,14 +59,32 @@ class CircuitBreaker:
             circuit['state'] = 'open'
             logger.warning(f"[⚠️] Circuit Breaker开启: {url} (失败{circuit['failures']}次)")
 
-    def record_success(self, url: str):
-        """记录一次成功"""
+    def record_success(self, url: str) -> None:
+        """
+        记录一次成功，重置熔断器状态
+
+        Args:
+            url: 成功的URL
+        """
         if url in self.circuits:
             self.circuits[url]['failures'] = 0
             self.circuits[url]['state'] = 'closed'
 
     def is_available(self, url: str) -> bool:
-        """判断端点是否可用"""
+        """
+        判断端点是否可用
+
+        Circuit Breaker状态机:
+        - closed: 端点正常，接受请求
+        - open: 端点故障，拒绝请求
+        - half_open: 端点恢复中，允许测试请求
+
+        Args:
+            url: 要检查的URL
+
+        Returns:
+            bool: 如果端点可用返回True，否则返回False
+        """
         if url not in self.circuits:
             return True
 
@@ -84,7 +108,7 @@ class CircuitBreaker:
         # half_open状态，允许一次请求来测试
         return circuit['state'] == 'half_open'
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> Dict[str, int]:
         """获取熔断器统计"""
         open_count = len([c for c in self.circuits.values() if c['state'] == 'open'])
         return {'total': len(self.circuits), 'open': open_count}
@@ -137,6 +161,18 @@ waf_backoff_until = 0  # Unix时间戳，标记WAF退避截止时间
 def identify_fingerprint(headers: Dict, body: str) -> Tuple[List[str], float]:
     """
     识别应用指纹（返回指纹列表和平均置信度）
+
+    Args:
+        headers: HTTP响应头字典
+        body: HTTP响应体内容
+
+    Returns:
+        (指纹名称列表, 平均置信度) 元组
+
+    Example:
+        >>> names, confidence = identify_fingerprint({}, "Whitelabel Error Page")
+        >>> "Spring Boot" in names
+        True
     """
     detected = {}  # {name: max_weight}
     headers_str = str(headers).lower()
@@ -172,6 +208,17 @@ def identify_fingerprint(headers: Dict, body: str) -> Tuple[List[str], float]:
 def get_title(html_content: str) -> str:
     """
     安全地提取HTML标题，避免正则表达式DoS
+
+    Args:
+        html_content: HTML内容字符串
+
+    Returns:
+        页面标题，若提取失败返回"无标题"
+
+    Note:
+        - 限制标题长度为100字符
+        - 清理换行符和控制字符
+        - 捕获所有异常避免影响扫描流程
     """
     try:
         # 使用更安全的正则表达式（限制匹配长度）
@@ -195,7 +242,18 @@ def get_title(html_content: str) -> str:
 # 泛域名检测（高级）
 # ==========================================
 def generate_random_subdomain(domain: str) -> str:
-    """生成随机子域名"""
+    """
+    生成随机子域名用于泛域名检测
+
+    Args:
+        domain: 主域名 (e.g., "example.com")
+
+    Returns:
+        生成的随机子域名 (e.g., "abc123def45.example.com")
+
+    Note:
+        使用10个随机大小写字母和数字组成子域名前缀
+    """
     random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
     return f"{random_str}.{domain}"
 
@@ -203,7 +261,19 @@ def generate_random_subdomain(domain: str) -> str:
 def get_wildcard_signature(domain: str) -> Dict:
     """
     高级泛域名检测：测试多个随机子域名对比
-    如果返回的内容相同，说明存在泛解析
+
+    Args:
+        domain: 目标主域名
+
+    Returns:
+        泛域名签名字典，包含以下字段:
+        - is_wildcard (bool): 是否检测到泛解析
+        - signatures (List[Dict]): 响应特征列表
+        - status_codes (List[int]): HTTP状态码列表
+
+    Note:
+        如果返回的内容相同，说明存在泛解析
+        支持HTTP和HTTPS两种协议检测
     """
     logger.info(f"[*] 检测泛域名配置...")
 
@@ -225,7 +295,7 @@ def get_wildcard_signature(domain: str) -> Dict:
             try:
                 res = requests.get(
                     url,
-                    verify=False,
+                    verify=Config.VERIFY_SSL_CERTIFICATE,
                     timeout=Config.REQUEST_TIMEOUT,
                     impersonate="chrome120"
                 )
@@ -255,7 +325,21 @@ def get_wildcard_signature(domain: str) -> Dict:
 def is_wildcard_response(response_sig: Dict, wildcard_sig: Dict) -> bool:
     """
     判断响应是否来自泛解析
-    比对响应特征和泛解析签名
+
+    通过比对响应特征和泛解析签名来判断
+
+    Args:
+        response_sig: 当前响应特征字典，包含:
+            - status_code: HTTP状态码
+            - content_length: 响应体长度
+            - title: 页面标题
+        wildcard_sig: 泛解析签名（来自 get_wildcard_signature()）
+
+    Returns:
+        bool: 如果判断为泛解析响应返回True，否则返回False
+
+    Note:
+        使用内容长度阈值（Config.WILDCARD_THRESHOLD）来判断
     """
     if not wildcard_sig.get("is_wildcard"):
         return False
@@ -281,6 +365,22 @@ def is_wildcard_response(response_sig: Dict, wildcard_sig: Dict) -> bool:
 def follow_redirects(url: str, max_redirects: int = Config.MAX_REDIRECTS) -> Tuple[str, List[str]]:
     """
     追踪HTTP重定向链，返回最终URL和重定向链
+
+    Args:
+        url: 初始URL
+        max_redirects: 最大重定向跟踪次数 (默认: Config.MAX_REDIRECTS)
+
+    Returns:
+        (最终URL, 重定向链列表) 元组
+        重定向链列表包含初始URL和所有重定向URL
+
+    Raises:
+        捕获所有网络异常并记录日志，不会抛出异常
+
+    Example:
+        >>> final, chain = follow_redirects("http://example.com")
+        >>> final in chain  # final URL在chain列表中
+        True
     """
     final_url = url
     redirect_chain = [url]
@@ -296,7 +396,7 @@ def follow_redirects(url: str, max_redirects: int = Config.MAX_REDIRECTS) -> Tup
                 final_url,
                 headers=headers,
                 proxies=proxies,
-                verify=False,
+                verify=Config.VERIFY_SSL_CERTIFICATE,
                 timeout=Config.REQUEST_TIMEOUT,
                 impersonate="chrome120",
                 allow_redirects=False  # 手动处理重定向
@@ -333,7 +433,7 @@ def follow_redirects(url: str, max_redirects: int = Config.MAX_REDIRECTS) -> Tup
 # ==========================================
 # 主探测函数
 # ==========================================
-def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) -> Optional[Dict]:
+def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) -> Optional[Asset]:
     """
     探测单个子域名：存活检测、指纹识别、漏洞验证
     P3-08改进：Circuit Breaker防止重复请求失败的端点
@@ -342,6 +442,9 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
         subdomain: 要探测的子域名
         wildcard_sig: 泛域名签名
         max_retries: 网络错误最多重试次数
+
+    返回:
+        Asset对象（如果存活），否则None
     """
     global CONSECUTIVE_BLOCKS, DYNAMIC_DELAY_BASE, waf_backoff_until
 
@@ -383,7 +486,7 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
                     url,
                     headers=stealth_headers,
                     proxies=current_proxy,
-                    verify=False,
+                    verify=Config.VERIFY_SSL_CERTIFICATE,
                     timeout=Config.REQUEST_TIMEOUT,
                     impersonate="chrome120",
                     allow_redirects=True
@@ -472,14 +575,17 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
             result = f"{marker} 存活: {url:<35} | 状态: {response.status_code} | 指纹: [{tech_str}] | 标题: {title}"
             logger.info(result)
 
-            return {
-                "url": url,
-                "status": response.status_code,
-                "fingerprint": tech_str,
-                "confidence": confidence,
-                "title": title,
-                "vulns": vulns
-            }
+            response_time_ms = int((time.time() - time.time()) * 1000) if hasattr(response, '_start_time') else None
+
+            return Asset(
+                url=url,
+                status=response.status_code,
+                fingerprint=tech_str,
+                confidence=confidence,
+                title=title,
+                vulns=vulns,
+                response_time=response_time_ms
+            )
 
     return None
 
@@ -487,14 +593,22 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
 # ==========================================
 # 批量探测函数
 # ==========================================
-def batch_probe(subdomains: List[str], target_domain: str, threads: int = Config.THREADS_DEFAULT) -> List[Dict]:
+def batch_probe(subdomains: List[str], target_domain: str, threads: int = Config.THREADS_DEFAULT) -> List[Asset]:
     """
     批量探测子域名
+
+    参数:
+        subdomains: 子域名列表
+        target_domain: 目标主域名
+        threads: 线程数
+
+    返回:
+        存活资产列表
     """
     wildcard_sig = get_wildcard_signature(target_domain)
     logger.info(f"\n[*] 开始并发探测，共 {len(subdomains)} 个目标（线程数: {threads}）...")
 
-    alive_assets = []
+    alive_assets: List[Asset] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [

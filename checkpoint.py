@@ -40,6 +40,16 @@ class CheckpointManager:
         self.batch_threshold = 10  # 每10个更新批处理一次
         self.time_threshold = 10   # 或每10秒批处理一次
 
+        # 性能优化：构建URL缓存集合，避免O(n)线性查找
+        self._alive_urls_cache: Set[str] = set(
+            asset["url"] for asset in self.data["results"]["alive_assets"]
+        )
+
+        # 漏洞hash缓存，用于去重
+        self._vuln_hashes_cache: Set[str] = set()
+        for vuln in self.data["results"]["vulnerabilities"]:
+            self._vuln_hashes_cache.add(self._hash_vuln(vuln))
+
     def _load_checkpoint(self) -> Dict:
         """加载已保存的检查点"""
         if os.path.exists(self.checkpoint_file):
@@ -138,20 +148,20 @@ class CheckpointManager:
     def add_alive_asset(self, asset: Dict):
         """添加发现的存活资产"""
         url = asset["url"]
-        # 检查是否已存在
-        if not any(a["url"] == url for a in self.data["results"]["alive_assets"]):
+        # 性能优化：使用set查找，O(1)而不是O(n)
+        if url not in self._alive_urls_cache:
             self.data["results"]["alive_assets"].append(asset)
+            self._alive_urls_cache.add(url)
             self.data["stages"]["probing"]["count"] += 1
             self.save()
 
     def add_vulnerability(self, vuln: Dict):
         """添加发现的漏洞"""
         vuln_hash = self._hash_vuln(vuln)
-        if not any(
-            self._hash_vuln(v) == vuln_hash
-            for v in self.data["results"]["vulnerabilities"]
-        ):
+        # 性能优化：使用set查找，O(1)而不是O(n)
+        if vuln_hash not in self._vuln_hashes_cache:
             self.data["results"]["vulnerabilities"].append(vuln)
+            self._vuln_hashes_cache.add(vuln_hash)
             self.data["stages"]["poc_testing"]["count"] += 1
             self.save()
 
@@ -204,7 +214,11 @@ class DedupManager:
             try:
                 with open(self.db_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except:
+            except json.JSONDecodeError as e:
+                logger.error(f"[-] JSON解析失败: {e}")
+                return {}
+            except Exception as e:
+                logger.error(f"[-] 加载去重数据失败: {e}")
                 return {}
         return {}
 

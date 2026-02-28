@@ -4,12 +4,12 @@
 """
 import sqlite3
 import threading
-import logging
 from typing import Optional, List, Dict, Any, Callable
 from contextlib import contextmanager
 from config import Config
+from logger import get_logger
 
-logger = logging.getLogger("database")
+logger = get_logger("database")
 
 
 class DatabaseConnectionPool:
@@ -78,8 +78,8 @@ class DatabaseConnectionPool:
             if conn:
                 try:
                     conn.rollback()
-                except Exception:
-                    pass
+                except Exception as rollback_err:
+                    logger.warning(f"[!] 事务回滚失败: {type(rollback_err).__name__}")
             raise
         finally:
             # 归还连接
