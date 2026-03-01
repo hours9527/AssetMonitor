@@ -11,6 +11,7 @@ import random
 import string
 import time
 import threading
+import ipaddress
 from typing import Dict, List, Optional, Tuple
 
 from datetime import datetime, timedelta
@@ -26,10 +27,99 @@ logger = get_logger("httpx_probe")
 
 
 # ==========================================
+# 安全验证函数
+# ==========================================
+def is_valid_hostname(hostname: str) -> bool:
+    """
+    验证主机名是否有效和可信
+    [修复] 防止SSRF和其他恶意输入
+
+    检查项：
+    - 不包含控制字符
+    - 不包含明显的注入字符
+    - 长度合理
+    - 不是保留IP地址（127.0.0.1, localhost等）
+
+    Args:
+        hostname: 主机名（可能包含端口）
+
+    Returns:
+        bool: 是否有效
+    """
+    if not hostname or len(hostname) > 256:
+        logger.debug(f"  [-] 主机名长度无效: {len(hostname) if hostname else 0}")
+        return False
+
+    # 分离主机和端口
+    if ':' in hostname:
+        host, port_str = hostname.rsplit(':', 1)
+        # 验证端口
+        try:
+            port = int(port_str)
+            if not (1 <= port <= 65535):
+                logger.debug(f"  [-] 端口号无效: {port}")
+                return False
+        except ValueError:
+            logger.debug(f"  [-] 端口不是数字: {port_str}")
+            return False
+    else:
+        host = hostname
+
+    # 检查禁止字符
+    forbidden_chars = ['/', '\\', '?', '#', '@', '!', '$', '&', '=', ' ', '\n', '\r', '\t', '\0']
+    if any(c in host for c in forbidden_chars):
+        logger.debug(f"  [-] 主机名包含禁止字符: {host}")
+        return False
+
+    # 检查是否为IP地址
+    try:
+        ip = ipaddress.ip_address(host)
+        # 拒绝私有IP和回环地址（防SSRF）
+        if ip.is_private or ip.is_loopback:
+            logger.debug(f"  [-] 拒绝私有/回环IP地址: {host}")
+            return False
+        if ip.is_reserved:
+            logger.debug(f"  [-] 拒绝保留IP地址: {host}")
+            return False
+    except ValueError:
+        # 不是IP地址，继续验证域名
+        # 基本域名验证
+        if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$', host):
+            logger.debug(f"  [-] 无效的域名格式: {host}")
+            return False
+
+    return True
+
+
+def validate_subdomain_list(subdomains: List[str]) -> List[str]:
+    """
+    验证子域名列表，过滤掉无效的
+
+    Args:
+        subdomains: 子域名列表
+
+    Returns:
+        经过验证的子域名列表
+    """
+    valid = []
+    for sub in subdomains:
+        if is_valid_hostname(sub):
+            valid.append(sub)
+        else:
+            logger.debug(f"  [-] 跳过无效子域名: {sub}")
+
+    logger.info(f"  [*] 子域名验证: {len(subdomains)} -> {len(valid)} (过滤了 {len(subdomains)-len(valid)} 个)")
+    return valid
+
+
+# ==========================================
 # P3-08: Circuit Breaker 模式 (防止无谓重试)
 # ==========================================
 class CircuitBreaker:
-    """P3-08: Circuit Breaker 防止重复请求失败的端点"""
+    """
+    P3-08: Circuit Breaker 防止重复请求失败的端点
+    [修复] 添加threading.Lock()防止竞态条件
+    """
 
     def __init__(self, failure_threshold: int = None, timeout: int = None):
         """
@@ -40,6 +130,7 @@ class CircuitBreaker:
         self.failure_threshold = failure_threshold or Config.CIRCUIT_BREAKER_FAILURE_THRESHOLD
         self.timeout = timeout or Config.CIRCUIT_BREAKER_TIMEOUT
         self.circuits = {}  # {url: {'failures': int, 'last_failure': timestamp, 'state': 'closed'|'open'|'half_open'}}
+        self.lock = threading.Lock()  # [修复] 保护circuits字典的并发访问
 
     def record_failure(self, url: str) -> None:
         """
@@ -48,16 +139,17 @@ class CircuitBreaker:
         Args:
             url: 失败的URL
         """
-        if url not in self.circuits:
-            self.circuits[url] = {'failures': 0, 'last_failure': None, 'state': 'closed'}
+        with self.lock:  # [修复] 线程安全地修改状态
+            if url not in self.circuits:
+                self.circuits[url] = {'failures': 0, 'last_failure': None, 'state': 'closed'}
 
-        circuit = self.circuits[url]
-        circuit['failures'] += 1
-        circuit['last_failure'] = time.time()
+            circuit = self.circuits[url]
+            circuit['failures'] += 1
+            circuit['last_failure'] = time.time()
 
-        if circuit['failures'] >= self.failure_threshold:
-            circuit['state'] = 'open'
-            logger.warning(f"[⚠️] Circuit Breaker开启: {url} (失败{circuit['failures']}次)")
+            if circuit['failures'] >= self.failure_threshold:
+                circuit['state'] = 'open'
+                logger.warning(f"[⚠️] Circuit Breaker开启: {url} (失败{circuit['failures']}次)")
 
     def record_success(self, url: str) -> None:
         """
@@ -66,9 +158,10 @@ class CircuitBreaker:
         Args:
             url: 成功的URL
         """
-        if url in self.circuits:
-            self.circuits[url]['failures'] = 0
-            self.circuits[url]['state'] = 'closed'
+        with self.lock:  # [修复] 线程安全地修改状态
+            if url in self.circuits:
+                self.circuits[url]['failures'] = 0
+                self.circuits[url]['state'] = 'closed'
 
     def is_available(self, url: str) -> bool:
         """
@@ -85,33 +178,35 @@ class CircuitBreaker:
         Returns:
             bool: 如果端点可用返回True，否则返回False
         """
-        if url not in self.circuits:
-            return True
-
-        circuit = self.circuits[url]
-
-        # 如果是closed状态，直接可用
-        if circuit['state'] == 'closed':
-            return True
-
-        # 如果是open状态，检查是否可以尝试恢复
-        if circuit['state'] == 'open':
-            elapsed = time.time() - circuit['last_failure']
-            if elapsed > self.timeout:
-                circuit['state'] = 'half_open'
-                circuit['failures'] = 0
-                logger.info(f"[↻] Circuit Breaker半开: {url} (尝试恢复)")
+        with self.lock:  # [修复] 线程安全地读取和修改状态
+            if url not in self.circuits:
                 return True
-            else:
-                return False
 
-        # half_open状态，允许一次请求来测试
-        return circuit['state'] == 'half_open'
+            circuit = self.circuits[url]
+
+            # 如果是closed状态，直接可用
+            if circuit['state'] == 'closed':
+                return True
+
+            # 如果是open状态，检查是否可以尝试恢复
+            if circuit['state'] == 'open':
+                elapsed = time.time() - circuit['last_failure']
+                if elapsed > self.timeout:
+                    circuit['state'] = 'half_open'
+                    circuit['failures'] = 0
+                    logger.info(f"[↻] Circuit Breaker半开: {url} (尝试恢复)")
+                    return True
+                else:
+                    return False
+
+            # half_open状态，允许一次请求来测试
+            return circuit['state'] == 'half_open'
 
     def get_stats(self) -> Dict[str, int]:
         """获取熔断器统计"""
-        open_count = len([c for c in self.circuits.values() if c['state'] == 'open'])
-        return {'total': len(self.circuits), 'open': open_count}
+        with self.lock:
+            open_count = len([c for c in self.circuits.values() if c['state'] == 'open'])
+            return {'total': len(self.circuits), 'open': open_count}
 
 
 # 全局Circuit Breaker实例
@@ -653,6 +748,7 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
 def batch_probe(subdomains: List[str], target_domain: str, threads: int = Config.THREADS_DEFAULT) -> List[Asset]:
     """
     批量探测子域名
+    [修复] 添加子域名验证，防止SSRF和恶意输入
 
     参数:
         subdomains: 子域名列表
@@ -662,15 +758,22 @@ def batch_probe(subdomains: List[str], target_domain: str, threads: int = Config
     返回:
         存活资产列表
     """
+    # [修复] 验证子域名列表，过滤掉无效和可疑的
+    validated_subdomains = validate_subdomain_list(subdomains)
+
+    if not validated_subdomains:
+        logger.warning("[!] 没有有效的子域名可探测")
+        return []
+
     wildcard_sig = get_wildcard_signature(target_domain)
-    logger.info(f"\n[*] 开始并发探测，共 {len(subdomains)} 个目标（线程数: {threads}）...")
+    logger.info(f"\n[*] 开始并发探测，共 {len(validated_subdomains)} 个目标（线程数: {threads}）...")
 
     alive_assets: List[Asset] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [
             executor.submit(probe_subdomain, sub, wildcard_sig)
-            for sub in subdomains
+            for sub in validated_subdomains
         ]
         for future in concurrent.futures.as_completed(futures):
             res = future.result()

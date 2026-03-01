@@ -240,12 +240,39 @@ class Config:
             return {}
 
     @classmethod
-    def to_dict(cls) -> Dict[str, Any]:
-        """将配置转为字典"""
-        return {
-            k: v for k, v in cls.__dict__.items()
-            if not k.startswith('_') and k.isupper()
+    def to_dict(cls, include_secrets: bool = False) -> Dict[str, Any]:
+        """
+        将配置转为字典
+        [修复] 默认不包含敏感信息，防止意外泄露
+
+        Args:
+            include_secrets: 是否包含敏感信息（令牌、密码等）
+
+        Returns:
+            配置字典
+        """
+        # 敏感键白名单 - 不应该在日志或调试输出中出现
+        SENSITIVE_KEYS = {
+            'CEYE_TOKEN', 'CEYE_DOMAIN',
+            'TG_BOT_TOKEN', 'TG_CHAT_ID',
+            'DINGTALK_WEBHOOK', 'DINGTALK_SECRET',
+            'WECHAT_WEBHOOK',
+            'EMAIL_PASSWORD', 'EMAIL_USER',
+            'PROXY_POOL'
         }
+
+        result = {}
+        for k, v in cls.__dict__.items():
+            if k.startswith('_') or not k.isupper():
+                continue
+
+            # 如果是敏感键且未明确请求，用***代替
+            if k in SENSITIVE_KEYS and not include_secrets:
+                result[k] = "***" if v else ""
+            else:
+                result[k] = v
+
+        return result
 
 
 # 快速访问
