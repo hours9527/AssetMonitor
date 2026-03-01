@@ -200,6 +200,7 @@ class SubdomainCollector:
         这能有效过滤扫描器生成的假域名
         P3-01改进：DNS查询超时保护
         P3-06改进：并行DNS验证 (ThreadPoolExecutor)
+        [修复] 添加future.result()超时，防止无限期阻塞
         """
         if not subdomains:
             return set()
@@ -228,19 +229,31 @@ class SubdomainCollector:
             except Exception:
                 return (True, subdomain, None)  # 保守起见，其他异常保留
 
-        # 使用线程池并行验证
-        with concurrent.futures.ThreadPoolExecutor(max_workers=dns_workers) as executor:
-            futures = {executor.submit(_verify_single, sub): sub for sub in subdomains}
+        # [修复] 使用线程池并行验证，但给future.result()添加超时
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=dns_workers) as executor:
+                futures = {executor.submit(_verify_single, sub): sub for sub in subdomains}
 
-            for future in concurrent.futures.as_completed(futures):
-                success, subdomain, error_type = future.result()
-                if success:
-                    verified.add(subdomain)
-                elif error_type == "timeout":
-                    timeout_count += 1
-                    verified.add(subdomain)  # 保守起见，超时的也保留
-                elif error_type == "failed":
-                    failed_count += 1
+                # [修复] 添加future.result()的超时，防止单个任务无限期阻塞
+                for future in concurrent.futures.as_completed(futures, timeout=dns_timeout * 2):
+                    try:
+                        success, subdomain, error_type = future.result(timeout=1)  # 额外的1秒超时
+                        if success:
+                            verified.add(subdomain)
+                        elif error_type == "timeout":
+                            timeout_count += 1
+                            verified.add(subdomain)  # 保守起见，超时的也保留
+                        elif error_type == "failed":
+                            failed_count += 1
+                    except concurrent.futures.TimeoutError:
+                        # [修复] 单个future任务超时，记录并保守处理
+                        timeout_count += 1
+                        # 获取对应的subdomain
+                        subdomain = futures.get(future, "unknown")
+                        logger.debug(f"  [-] DNS验证超时（任务级）: {subdomain}")
+        except concurrent.futures.TimeoutError:
+            # [修复] 整体验证超时（所有futures都超过时间限制）
+            logger.warning(f"  [!] DNS验证总体超时 ({dns_timeout * 2}s)，保留已检查的 {len(verified)} 个域名")
 
         # 恢复全局超时设置，避免影响其他模块
         socket.setdefaulttimeout(old_timeout)

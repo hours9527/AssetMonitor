@@ -693,8 +693,16 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
         else:
             waf_manager.reset_blocks()
 
-            # ===== 内容提取 =====
+            # [修复] 检查响应大小，防止内存溢出
+            # 设置最大响应大小为10MB（可以通过Config调整）
+            MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10MB
             content_length = len(response.content)
+
+            if content_length > MAX_RESPONSE_SIZE:
+                logger.warning(f"  [!] 响应体过大 ({content_length / 1024 / 1024:.1f}MB > {MAX_RESPONSE_SIZE / 1024 / 1024:.1f}MB): {url}")
+                continue
+
+            # ===== 内容提取 =====
             title = get_title(response.text)
 
             # ===== 泛解析过滤 =====

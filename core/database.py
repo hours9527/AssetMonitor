@@ -52,23 +52,41 @@ class DatabaseConnectionPool:
     def get_connection(self):
         """
         获取连接上下文管理器
+        [修复] 添加超时等待，防止连接池资源耗尽时立即失败
         使用方式:
             with db_pool.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(...)
         """
         conn = None
-        try:
-            # 获取可用连接
-            with self.lock:
-                for i, available in enumerate(self.available):
-                    if available:
-                        self.available[i] = False
-                        conn = self.connections[i]
-                        break
+        start_time = None
 
-            if conn is None:
-                raise Exception("无可用数据库连接（连接池已满）")
+        try:
+            # [修复] 添加超时等待机制 - 最多等待DB_TIMEOUT秒获取可用连接
+            import time
+            start_time = time.time()
+
+            while True:
+                with self.lock:
+                    for i, available in enumerate(self.available):
+                        if available:
+                            self.available[i] = False
+                            conn = self.connections[i]
+                            break
+
+                if conn is not None:
+                    break
+
+                # [修复] 如果没有可用连接，等待一段时间后重试
+                elapsed = time.time() - start_time
+                if elapsed > self.timeout:
+                    raise TimeoutError(
+                        f"等待数据库连接超时 ({self.timeout}s)：连接池全满，"
+                        f"无可用连接。可能原因：长事务未结束、连接泄漏或并发度过高"
+                    )
+
+                # 睡眠100ms后重试，避免忙轮询
+                time.sleep(0.1)
 
             yield conn
 
