@@ -29,6 +29,8 @@ def _load_dotenv():
         'ENABLE_PROXY', 'PROXY_POOL',
         # OOB配置
         'OOB_ENABLED', 'OOB_PLATFORM', 'OOB_TIMEOUT', 'CEYE_TOKEN', 'CEYE_DOMAIN',
+        'OOB_PRIMARY_SERVICE', 'OOB_FALLBACK_ENABLED', 'OOB_HEALTH_CHECK_INTERVAL',
+        'DNSLOG_TOKEN', 'DNSLOG_DOMAIN',
         # 数据库
         'DB_FILE', 'DB_POOL_SIZE', 'DB_TIMEOUT',
         # 通知
@@ -86,7 +88,8 @@ def _load_dotenv():
                     numeric_keys = {
                         'THREADS', 'REQUEST_TIMEOUT', 'SMART_SLEEP_MIN', 'SMART_SLEEP_MAX',
                         'DNS_TIMEOUT', 'POC_TIMEOUT', 'CIRCUIT_BREAKER_THRESHOLD',
-                        'CIRCUIT_BREAKER_TIMEOUT', 'OOB_TIMEOUT', 'DB_POOL_SIZE', 'DB_TIMEOUT',
+                        'CIRCUIT_BREAKER_TIMEOUT', 'OOB_TIMEOUT', 'OOB_HEALTH_CHECK_INTERVAL',
+                        'DB_POOL_SIZE', 'DB_TIMEOUT',
                         'LOG_MAX_BYTES', 'LOG_BACKUP_COUNT', 'CHECKPOINT_AUTO_SAVE_INTERVAL',
                         'NOTIFY_DEDUP_HOURS', 'NOTIFY_RATE_LIMIT', 'DEDUP_EXPIRE_DAYS',
                         'SMTP_POOL_SIZE', 'EMAIL_PORT'
@@ -161,6 +164,13 @@ class Config:
     OOB_TIMEOUT = int(os.getenv("OOB_TIMEOUT", "15"))
     CEYE_TOKEN = os.getenv("CEYE_TOKEN", "")
     CEYE_DOMAIN = os.getenv("CEYE_DOMAIN", "")
+
+    # OOB Service Fallback (M1 improvement)
+    OOB_PRIMARY_SERVICE = os.getenv("OOB_PRIMARY_SERVICE", "ceye")  # ceye or dnslog
+    OOB_FALLBACK_ENABLED = os.getenv("OOB_FALLBACK_ENABLED", "true").lower() == "true"
+    OOB_HEALTH_CHECK_INTERVAL = int(os.getenv("OOB_HEALTH_CHECK_INTERVAL", "300"))  # seconds
+    DNSLOG_TOKEN = os.getenv("DNSLOG_TOKEN", "")
+    DNSLOG_DOMAIN = os.getenv("DNSLOG_DOMAIN", "")
 
     # ==================== 数据库配置 ====================
     DB_FILE = os.getenv("DB_FILE", "secbot_memory.db")
