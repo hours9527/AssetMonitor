@@ -1,6 +1,7 @@
 import requests
 import socket
 import json
+import re
 import concurrent.futures
 from typing import Set, List, Dict
 from datetime import datetime
@@ -23,6 +24,13 @@ class SubdomainCollector:
         """
         多源子域名聚合收集
         """
+        # [新增] 如果目标是IP地址(或带端口)，直接将其作为资产返回，跳过收集
+        if self._is_ip_target(domain):
+            # 清理协议前缀 (如 http://127.0.0.1 -> 127.0.0.1)
+            clean_target = domain.split("://")[-1].split("/")[0]
+            logger.info(f"[*] 目标识别为IP地址/端口: {domain}，跳过子域名收集")
+            return [clean_target]
+
         logger.info(f"[*] 开始多源子域名收集: {domain}")
 
         subdomains = set()
@@ -39,6 +47,15 @@ class SubdomainCollector:
 
         if "dnsdumpster" in sources:
             subs = self._dnsdumpster(domain)
+            subdomains.update(subs)
+
+        # 新增数据源
+        if "alienvault" in sources:
+            subs = self._alienvault(domain)
+            subdomains.update(subs)
+            
+        if "rapiddns" in sources:
+            subs = self._rapiddns(domain)
             subdomains.update(subs)
 
         # DNS 验证 (可选，耗时但准确)
@@ -126,6 +143,57 @@ class SubdomainCollector:
 
         return subdomains
 
+    def _alienvault(self, domain: str) -> Set[str]:
+        """数据源4: AlienVault OTX"""
+        logger.info("  [>] 调用 AlienVault 接口...")
+        subdomains = set()
+        try:
+            url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=100&page=1"
+            response = requests.get(url, headers=self.headers, timeout=20)
+            if response.status_code == 200:
+                data = response.json()
+                for item in data.get('url_list', []):
+                    hostname = item.get('hostname')
+                    if hostname and hostname.endswith(domain):
+                        subdomains.add(hostname)
+                logger.info(f"  [+] AlienVault 收集成功: {len(subdomains)} 个")
+                self.sources_result["AlienVault"] = len(subdomains)
+        except Exception as e:
+            logger.error(f"  [-] AlienVault 请求失败: {e}")
+        return subdomains
+
+    def _rapiddns(self, domain: str) -> Set[str]:
+        """数据源5: RapidDNS"""
+        logger.info("  [>] 调用 RapidDNS 接口...")
+        subdomains = set()
+        try:
+            url = f"https://rapiddns.io/subdomain/{domain}?full=1"
+            # RapidDNS 有时会拦截 Python 请求，依赖 stealth_headers
+            response = requests.get(url, headers=self.headers, timeout=20)
+            if response.status_code == 200:
+                # 正则提取表格中的子域名
+                pattern = r'<td>\s*([a-zA-Z0-9.-]+\.' + re.escape(domain) + r')\s*</td>'
+                found = re.findall(pattern, response.text)
+                for sub in found:
+                    subdomains.add(sub)
+                logger.info(f"  [+] RapidDNS 收集成功: {len(subdomains)} 个")
+                self.sources_result["RapidDNS"] = len(subdomains)
+        except Exception as e:
+            logger.error(f"  [-] RapidDNS 请求失败: {e}")
+        return subdomains
+
+    def _is_ip_target(self, target: str) -> bool:
+        """判断是否为IP目标 (IPv4)"""
+        # 移除协议
+        if "://" in target:
+            target = target.split("://")[1]
+        target = target.split("/")[0]
+        # 移除端口
+        host = target.split(":")[0]
+        # IPv4正则验证 - 每个字段必须在0-255之间
+        pattern = r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+        return bool(re.match(pattern, host))
+
     def _dns_verify(self, subdomains: Set[str]) -> Set[str]:
         """
         DNS验证：移除无法解析的子域名
@@ -133,6 +201,9 @@ class SubdomainCollector:
         P3-01改进：DNS查询超时保护
         P3-06改进：并行DNS验证 (ThreadPoolExecutor)
         """
+        if not subdomains:
+            return set()
+
         # P3-01: 使用Config中的DNS_TIMEOUT配置
         dns_timeout = Config.DNS_TIMEOUT if hasattr(Config, 'DNS_TIMEOUT') else 2
         old_timeout = socket.getdefaulttimeout()

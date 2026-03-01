@@ -129,6 +129,7 @@ FINGERPRINTS = [
 
     # Apache Shiro
     {"name": "Apache Shiro", "location": "header", "keyword": "rememberMe=", "weight": 0.85},
+    {"name": "Apache Shiro", "location": "header", "keyword": "JSESSIONID", "weight": 0.75},  # Shiro应用的会话标识
 
     # ThinkPHP
     {"name": "ThinkPHP", "location": "header", "keyword": "X-Powered-By: ThinkPHP", "weight": 0.90},
@@ -482,15 +483,41 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
                 current_proxy = get_random_proxy()
 
                 # 发送请求
-                response = requests.get(
+                start_perf = time.perf_counter()
+
+                # 先做一个不跟随重定向的请求以捕获初始响应头（包括Set-Cookie）
+                initial_response = requests.get(
                     url,
                     headers=stealth_headers,
                     proxies=current_proxy,
                     verify=Config.VERIFY_SSL_CERTIFICATE,
                     timeout=Config.REQUEST_TIMEOUT,
                     impersonate="chrome120",
-                    allow_redirects=True
+                    allow_redirects=False
                 )
+
+                # 如果是重定向，继续跟随重定向获取最终内容
+                if initial_response.status_code in [301, 302, 303, 307, 308]:
+                    response = requests.get(
+                        url,
+                        headers=stealth_headers,
+                        proxies=current_proxy,
+                        verify=Config.VERIFY_SSL_CERTIFICATE,
+                        timeout=Config.REQUEST_TIMEOUT,
+                        impersonate="chrome120",
+                        allow_redirects=True
+                    )
+                    # 合并初始响应头到最终响应（用于指纹识别）
+                    # 将初始响应的Set-Cookie等重要头部添加到最终响应
+                    for key, value in initial_response.headers.items():
+                        if key.lower() in ['set-cookie', 'server', 'x-powered-by']:
+                            if key not in response.headers:
+                                response.headers[key] = value
+                else:
+                    response = initial_response
+
+                # 记录耗时 (ms)
+                response.elapsed_ms = int((time.perf_counter() - start_perf) * 1000)
 
                 # P3-08: 请求成功，重置circuit breaker状态
                 circuit_breaker.record_success(url)
@@ -560,9 +587,8 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
             tech_str = ", ".join(tech_stack)
 
             # ===== 漏洞检测 =====
-            vulns = []
-            if tech_stack != ["未知"]:
-                vulns = run_pocs(url, tech_stack)
+            # 无论是否识别出指纹，都调用POC引擎（引擎内部会处理通用POC）
+            vulns = run_pocs(url, tech_stack)
 
             # ===== 输出格式化 =====
             if vulns:
@@ -575,7 +601,7 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
             result = f"{marker} 存活: {url:<35} | 状态: {response.status_code} | 指纹: [{tech_str}] | 标题: {title}"
             logger.info(result)
 
-            response_time_ms = int((time.time() - time.time()) * 1000) if hasattr(response, '_start_time') else None
+            response_time_ms = getattr(response, 'elapsed_ms', 0)
 
             return Asset(
                 url=url,

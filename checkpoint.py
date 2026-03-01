@@ -145,22 +145,35 @@ class CheckpointManager:
         )
         return list(all_subs - probed_subs)
 
-    def add_alive_asset(self, asset: Dict):
+    def add_alive_asset(self, asset):
         """添加发现的存活资产"""
-        url = asset["url"]
+        # 兼容 Asset 对象和字典
+        if hasattr(asset, 'to_dict'):
+            asset_data = asset.to_dict()
+            url = asset.url
+        else:
+            asset_data = asset
+            url = asset["url"]
+
         # 性能优化：使用set查找，O(1)而不是O(n)
         if url not in self._alive_urls_cache:
-            self.data["results"]["alive_assets"].append(asset)
+            self.data["results"]["alive_assets"].append(asset_data)
             self._alive_urls_cache.add(url)
             self.data["stages"]["probing"]["count"] += 1
             self.save()
 
-    def add_vulnerability(self, vuln: Dict):
+    def add_vulnerability(self, vuln):
         """添加发现的漏洞"""
-        vuln_hash = self._hash_vuln(vuln)
+        # 兼容 Vulnerability 对象和字典
+        if hasattr(vuln, 'to_dict'):
+            vuln_data = vuln.to_dict()
+        else:
+            vuln_data = vuln
+
+        vuln_hash = self._hash_vuln(vuln_data)
         # 性能优化：使用set查找，O(1)而不是O(n)
         if vuln_hash not in self._vuln_hashes_cache:
-            self.data["results"]["vulnerabilities"].append(vuln)
+            self.data["results"]["vulnerabilities"].append(vuln_data)
             self._vuln_hashes_cache.add(vuln_hash)
             self.data["stages"]["poc_testing"]["count"] += 1
             self.save()
@@ -168,7 +181,9 @@ class CheckpointManager:
     @staticmethod
     def _hash_vuln(vuln: Dict) -> str:
         """计算漏洞哈希值（用于去重）"""
-        key = f"{vuln.get('url', '')}_{vuln.get('vuln_name', '')}"
+        # 优先使用 payload_url (新模型)，回退到 url (旧模型)
+        target = vuln.get('payload_url') or vuln.get('url') or ''
+        key = f"{target}_{vuln.get('vuln_name', '')}"
         return hashlib.md5(key.encode()).hexdigest()
 
     def set_wildcard_signature(self, signature: Dict):

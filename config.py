@@ -39,7 +39,7 @@ class Config:
     SMART_SLEEP_MAX = float(os.getenv("SMART_SLEEP_MAX", "0.8"))
 
     # ==================== 子域名收集 ====================
-    SUBDOMAIN_SOURCES = ["hackertarget", "crtsh"]  # 支持的数据源
+    SUBDOMAIN_SOURCES = ["hackertarget", "crtsh", "alienvault", "rapiddns"]  # 增加更多源
     HACKERTARGET_URL = "https://api.hackertarget.com/hostsearch/?q={domain}"
     CRTSH_URL = "https://crt.sh/?q=%25.{domain}&output=json"
     SUBDOMAIN_CACHE_HOURS = 12  # 子域名缓存时间

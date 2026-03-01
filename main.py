@@ -8,13 +8,14 @@ import time
 import argparse
 import json
 import csv
+import hashlib
 from typing import Dict, List, Any
 from datetime import datetime
 
 from config import Config
 from logger import get_logger
 from checkpoint import CheckpointManager, DedupManager
-from core.database import init_database, get_db_manager  # 新增数据库导入
+from core.database import init_database  # 新增数据库导入
 from core.di_container import initialize_di_container
 from core.subdomain import get_subdomains
 from core.httpx_probe import batch_probe
@@ -89,6 +90,13 @@ def export_results(results: Dict[str, Any], target_domain: str, scan_id: str) ->
     if "json" in Config.OUTPUT_FORMATS:
         json_file = os.path.join(Config.OUTPUT_DIR, f"{base_filename}_results.json")
         try:
+            # 转换对象为字典以便JSON序列化
+            serializable_results = {
+                "subdomains": results['subdomains'],
+                "alive_assets": [a.to_dict() for a in results['alive_assets']],
+                "vulnerabilities": [v.to_dict() for v in results['vulnerabilities']]
+            }
+
             json_result = {
                 "target": target_domain,
                 "scan_id": scan_id,
@@ -98,7 +106,7 @@ def export_results(results: Dict[str, Any], target_domain: str, scan_id: str) ->
                     "alive_assets": len(results['alive_assets']),
                     "vulnerabilities_found": len(results['vulnerabilities'])
                 },
-                "results": results
+                "results": serializable_results
             }
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(json_result, f, ensure_ascii=False, indent=2)
@@ -229,7 +237,7 @@ def main() -> None:
     try:
         logger.info("[*] 初始化数据库连接池...")
         initialize_di_container()
-        db_manager = get_db_manager()
+        db_manager = init_database()
         if db_manager:
             logger.info("[✓] 数据库初始化成功")
         else:
@@ -262,6 +270,11 @@ def main() -> None:
 
     # 生成扫描ID (用于断点续传)
     scan_id = f"{target_domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    # 记录扫描开始
+    if db_manager:
+        db_manager.start_scan(scan_id, target_domain)
+
     checkpoint = CheckpointManager(scan_id) if enable_checkpoint else None
     dedup = DedupManager()
 
@@ -313,6 +326,36 @@ def main() -> None:
     # ===== 阶段三：数据持久化 =====
     logger.info(f"\n[>>>] 阶段三：结果导出与持久化...")
 
+    # 同步数据到数据库
+    if db_manager:
+        logger.info("[*] 正在同步数据到数据库...")
+        try:
+            save_count = 0
+            for asset in alive_assets:
+                # 保存资产
+                db_manager.add_asset(
+                    asset.url,
+                    target_domain,
+                    asset.status,
+                    asset.fingerprint,
+                    asset.confidence,
+                    asset.title
+                )
+                save_count += 1
+                
+                # 保存漏洞
+                for vuln in asset.vulns:
+                    v_key = f"{asset.url}_{vuln.vuln_name}"
+                    v_hash = hashlib.md5(v_key.encode()).hexdigest()
+                    db_manager.add_vulnerability(
+                        v_hash, asset.url, target_domain, vuln.to_dict()
+                    )
+            
+            db_manager.complete_scan(scan_id, len(subdomains), len(alive_assets), len(all_vulnerabilities))
+            logger.info(f"[✓] 数据库同步完成 (已保存 {save_count} 个资产)")
+        except Exception as e:
+            logger.error(f"[-] 数据库同步失败: {e}")
+
     results = {
         "subdomains": subdomains,
         "alive_assets": alive_assets,
@@ -323,7 +366,19 @@ def main() -> None:
 
     # ===== 阶段四：通知告警 =====
     logger.info(f"\n[>>>] 阶段四：触发通知规则引擎...")
-    send_alert(target_domain, alive_assets)
+
+    # Convert Asset objects to dicts for send_alert
+    alert_assets = []
+    for asset in alive_assets:
+        alert_assets.append({
+            "url": asset.url,
+            "status": asset.status,
+            "fingerprint": asset.fingerprint,
+            "confidence": asset.confidence,
+            "title": asset.title,
+            "vulns": [v.to_dict() for v in asset.vulns]
+        })
+    send_alert(target_domain, alert_assets)
 
     # ===== 清理检查点 =====
     if enable_checkpoint:

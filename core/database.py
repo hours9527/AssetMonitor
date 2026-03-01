@@ -201,6 +201,16 @@ class DatabaseInitializer:
                 )
             ''')
 
+            # [新增] 自动迁移：检查并修复旧版数据库 (缺少 domain 列)
+            try:
+                cursor.execute("SELECT domain FROM assets LIMIT 0")
+            except Exception:
+                logger.info("[*] 执行数据库迁移: 添加 domain 列到 assets 表")
+                try:
+                    cursor.execute("ALTER TABLE assets ADD COLUMN domain TEXT DEFAULT ''")
+                except Exception as e:
+                    logger.warning(f"[!] 数据库迁移失败: {e}")
+
             # 创建漏洞表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -283,7 +293,7 @@ class DatabaseInitializer:
                 url,
                 domain,
                 vuln_data.get('vuln_name', ''),
-                vuln_data.get('type', 'Unknown'),
+                vuln_data.get('vuln_type') or vuln_data.get('type', 'Unknown'),
                 vuln_data.get('severity', 'UNKNOWN'),
                 vuln_data.get('payload_url', ''),
                 vuln_data.get('confidence', 0)

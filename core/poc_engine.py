@@ -118,6 +118,14 @@ def _get_default_registry():
             "pocs": {
                 "check_shiro_rce": {"severity": "HIGH", "confidence": 0.85, "timeout": 3}
             }
+        },
+        # [新增] 通用漏洞检测框架
+        "通用": {
+            "priority": 10,  # 优先级较低，在特定指纹之后运行
+            "confidence_baseline": 0.70,
+            "pocs": {
+                "check_git_exposure": {"severity": "HIGH", "confidence": 0.98, "timeout": 3}
+            }
         }
     }
 
@@ -186,7 +194,7 @@ def check_springboot_actuator(url: str) -> Optional[Vulnerability]:
         res = requests.get(
             target_url,
             headers=headers,
-            verify=False,
+            verify=Config.VERIFY_SSL_CERTIFICATE,
             timeout=Config.POC_TIMEOUT,
             impersonate="chrome120"
         )
@@ -201,6 +209,43 @@ def check_springboot_actuator(url: str) -> Optional[Vulnerability]:
             )
     except Exception as e:
         logger.debug(f"  [-] Spring Boot Actuator POC失败: {e}")
+
+    return None
+
+
+def check_shiro_rce(url: str) -> Optional[Vulnerability]:
+    """Apache Shiro 反序列化RCE (CVE-2016-4437)"""
+    try:
+        smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
+        headers = get_stealth_headers()
+
+        # 检查初始URL的302响应中是否有JSESSIONID
+        # 这是Shiro应用的特征行为
+        res_init = requests.get(
+            url,
+            headers=headers,
+            verify=Config.VERIFY_SSL_CERTIFICATE,
+            timeout=Config.POC_TIMEOUT,
+            impersonate="chrome120",
+            allow_redirects=False
+        )
+
+        logger.debug(f"  [*] Shiro初始检查: {url}, 状态: {res_init.status_code}")
+
+        # 检查Set-Cookie头中是否有JSESSIONID（Shiro的会话标识）
+        set_cookie = res_init.headers.get('Set-Cookie', '')
+        if 'JSESSIONID' in set_cookie:
+            logger.info(f"      [!!!] 成功验证: Apache Shiro 反序列化RCE (置信度: 95%)")
+            return Vulnerability(
+                vuln_name="Apache Shiro 反序列化RCE",
+                payload_url=f"{url.rstrip('/')}/",
+                severity=Severity.CRITICAL,
+                vuln_type=VulnType.REMOTE_CODE_EXECUTION,
+                discovered_at=datetime.now().isoformat(),
+                confidence=0.95
+            )
+    except Exception as e:
+        logger.debug(f"  [-] Shiro RCE POC失败: {e}")
 
     return None
 
@@ -222,7 +267,7 @@ def check_log4j2_oob(url: str) -> Optional[Vulnerability]:
         requests.get(
             url,
             headers=headers,
-            verify=False,
+            verify=Config.VERIFY_SSL_CERTIFICATE,
             timeout=Config.POC_TIMEOUT,
             impersonate="chrome120"
         )
@@ -245,6 +290,34 @@ def check_log4j2_oob(url: str) -> Optional[Vulnerability]:
     return None
 
 
+def check_git_exposure(url: str) -> Optional[Vulnerability]:
+    """检测.git目录泄露"""
+    target_url = f"{url.rstrip('/')}/.git/config"
+    try:
+        smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
+        headers = get_stealth_headers()
+        res = requests.get(
+            target_url,
+            headers=headers,
+            verify=Config.VERIFY_SSL_CERTIFICATE,
+            timeout=Config.POC_TIMEOUT,
+            impersonate="chrome120"
+        )
+        if res.status_code == 200 and '[core]' in res.text:
+            return Vulnerability(
+                vuln_name=".git 源代码泄露",
+                payload_url=target_url,
+                severity=Severity.HIGH,
+                vuln_type=VulnType.INFORMATION_DISCLOSURE,
+                discovered_at=datetime.now().isoformat(),
+                confidence=0.98
+            )
+    except Exception as e:
+        logger.debug(f"  [-] .git泄露检测失败: {e}")
+
+    return None
+
+
 def check_nginx_version(url: str) -> Optional[Vulnerability]:
     """Nginx 版本信息泄露检测"""
     try:
@@ -253,7 +326,7 @@ def check_nginx_version(url: str) -> Optional[Vulnerability]:
         res = requests.get(
             url,
             headers=headers,
-            verify=False,
+            verify=Config.VERIFY_SSL_CERTIFICATE,
             timeout=Config.POC_TIMEOUT,
             impersonate="chrome120"
         )
@@ -285,7 +358,7 @@ def check_iis_webdav(url: str) -> Optional[Vulnerability]:
         res = requests.options(
             url,
             headers=headers,
-            verify=False,
+            verify=Config.VERIFY_SSL_CERTIFICATE,
             timeout=Config.POC_TIMEOUT,
             impersonate="chrome120"
         )
@@ -326,7 +399,7 @@ def check_thinkphp_rce(url: str) -> Optional[Vulnerability]:
             res = requests.get(
                 test_url,
                 headers=headers,
-                verify=False,
+                verify=Config.VERIFY_SSL_CERTIFICATE,
                 timeout=Config.POC_TIMEOUT,
                 impersonate="chrome120"
             )
@@ -365,7 +438,7 @@ def check_jboss_deserialization(url: str) -> Optional[Vulnerability]:
                 res = requests.head(
                     test_url,
                     headers=headers,
-                    verify=False,
+                    verify=Config.VERIFY_SSL_CERTIFICATE,
                     timeout=Config.POC_TIMEOUT,
                     impersonate="chrome120"
                 )
@@ -406,9 +479,18 @@ def run_pocs(url: str, fingerprints: List[str]) -> List[Vulnerability]:
     discovered_vulns: List[Vulnerability] = []
     executed_pocs = set()  # 避免重复执行同一个POC
 
-    # 按优先级排序指纹
+    # [改进] 始终包含通用漏洞检测
+    # 如果传入的指纹是['未知']，则替换为空列表，否则使用原列表
+    # 这样可以确保即使没有识别出指纹，通用POC也能运行
+    active_fingerprints = set(fp for fp in fingerprints if fp != "未知")
+
+    # 始终添加“通用”指纹组，用于执行无差别POC
+    if "通用" in POC_REGISTRY:
+        active_fingerprints.add("通用")
+
+    # 按优先级排序要检查的指纹
     sorted_fps = sorted(
-        fingerprints,
+        list(active_fingerprints),
         key=lambda fp: POC_REGISTRY.get(fp, {}).get("priority", 999)
     )
 
@@ -425,7 +507,7 @@ def run_pocs(url: str, fingerprints: List[str]) -> List[Vulnerability]:
         if not poc_list:
             continue
 
-        logger.info(f"    [>] 触发 {fp} 漏洞检测")
+        logger.info(f"    [>] 触发 {fp} 漏洞检测...")
 
         for poc_name, poc_meta in poc_list.items():
             # 避免重复执行相同POC

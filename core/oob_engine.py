@@ -2,6 +2,7 @@ import requests
 import random
 import string
 import time
+from config import Config
 from logger import get_logger
 
 logger = get_logger("oob_engine")
@@ -11,10 +12,10 @@ class OOBEngine:
     def __init__(self):
         """
         企业级 OOB 盲打引擎 (基于 Ceye.io 架构)
-        未来实战中，请前往 ceye.io 注册，替换以下两个值。
+        优先从 Config 读取配置
         """
-        self.api_token = "YOUR_CEYE_TOKEN"
-        self.domain_identifier = "YOUR_IDENTIFIER.ceye.io"
+        self.api_token = Config.CEYE_TOKEN or "YOUR_CEYE_TOKEN"
+        self.domain_identifier = Config.CEYE_DOMAIN or "YOUR_IDENTIFIER.ceye.io"
 
     def generate_payload(self):
         """
@@ -29,7 +30,7 @@ class OOBEngine:
         """
         静默查询接口：去盲打平台看看，目标服务器有没有偷偷访问我们的域名
         """
-        if self.api_token == "YOUR_CEYE_TOKEN":
+        if self.api_token == "YOUR_CEYE_TOKEN" or not self.api_token:
             # 如果没配置真实 Token，直接返回 False 防报错
             logger.warning("[OOB] 未配置真实 Ceye API，跳过无回显漏洞验证。")
             return False
