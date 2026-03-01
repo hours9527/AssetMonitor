@@ -402,38 +402,112 @@ def check_iis_webdav(url: str) -> Optional[Vulnerability]:
 
 
 def check_thinkphp_rce(url: str) -> Optional[Vulnerability]:
-    """ThinkPHP RCE检测（简化版）"""
-    # 这是简化实现，实际需要特定payload
+    """ThinkPHP检测-增强版（多点验证）"""
     try:
-        smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
-        headers = get_stealth_headers()
+        confidence = 0
+        features_detected = []
 
-        # ThinkPHP的典型RCE路由
-        test_urls = [
-            f"{url.rstrip('/')}/index.php?m=Home&c=Index&a=test",
-            f"{url.rstrip('/')}/index.php/Home/Index/test",
-        ]
+        # 检测1: X-Powered-By 头检查
+        try:
+            smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
+            res = requests.head(
+                url,
+                headers=get_stealth_headers(),
+                verify=Config.VERIFY_SSL_CERTIFICATE,
+                timeout=Config.POC_TIMEOUT,
+                impersonate="chrome120"
+            )
+            powered_by = res.headers.get('X-Powered-By', '').lower()
+            if 'thinkphp' in powered_by:
+                confidence += 0.25
+                features_detected.append("X-Powered-By header")
+        except Exception as e:
+            logger.debug(f"  [-] 头检查异常: {e}")
 
-        for test_url in test_urls:
-            res = requests.get(
-                test_url,
-                headers=headers,
+        # 检测2: POST /index.php 测试（ThinkPHP 特定语法）
+        try:
+            smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
+            target = f"{url.rstrip('/')}/index.php"
+            res = requests.post(
+                target,
+                data={"s": "/admin/index/index"},  # ThinkPHP 路由语法
+                headers=get_stealth_headers(),
                 verify=Config.VERIFY_SSL_CERTIFICATE,
                 timeout=Config.POC_TIMEOUT,
                 impersonate="chrome120"
             )
 
-            if res.status_code == 200 and 'thinkphp' in res.text.lower():
-                return Vulnerability(
-                    vuln_name="ThinkPHP 可能存在RCE漏洞",
-                    payload_url=test_url,
-                    severity=Severity.HIGH,
-                    vuln_type=VulnType.REMOTE_CODE_EXECUTION,
-                    discovered_at=datetime.now().isoformat(),
-                    confidence=0.70
+            # ThinkPHP 错误页面特征
+            if "think\\" in res.text or "thinkphp" in res.text.lower():
+                confidence += 0.30
+                features_detected.append("POST /index.php 响应")
+
+            # 检查特定 ThinkPHP 错误页面结构
+            if "Request URL" in res.text and "REQUEST_METHOD" in res.text:
+                confidence += 0.15
+                features_detected.append("错误页面结构")
+        except Exception as e:
+            logger.debug(f"  [-] POST 检测异常: {e}")
+
+        # 检测3: /admin 路由探测（常见 ThinkPHP 结构）
+        try:
+            smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
+            target = f"{url.rstrip('/')}/admin/"
+            res = requests.get(
+                target,
+                headers=get_stealth_headers(),
+                verify=Config.VERIFY_SSL_CERTIFICATE,
+                timeout=Config.POC_TIMEOUT,
+                impersonate="chrome120"
+            )
+
+            # 200 或 302 重定向到登录页面表示有效的管理路由
+            if res.status_code in [200, 302]:
+                if "login" in res.text.lower() or "admin" in res.text.lower():
+                    confidence += 0.15
+                    features_detected.append("管理路由访问")
+        except Exception as e:
+            logger.debug(f"  [-] 管理路由检测异常: {e}")
+
+        # 检测4: GET 请求关键字检查（原始方法）
+        try:
+            smart_sleep(Config.SMART_SLEEP_MIN, Config.SMART_SLEEP_MAX)
+            # ThinkPHP 的典型 RCE 路由
+            test_urls = [
+                f"{url.rstrip('/')}/index.php?m=Home&c=Index&a=test",
+                f"{url.rstrip('/')}/index.php/Home/Index/test",
+            ]
+
+            for test_url in test_urls:
+                res = requests.get(
+                    test_url,
+                    headers=get_stealth_headers(),
+                    verify=Config.VERIFY_SSL_CERTIFICATE,
+                    timeout=Config.POC_TIMEOUT,
+                    impersonate="chrome120"
                 )
+
+                if "thinkphp" in res.text.lower():
+                    confidence += 0.15
+                    features_detected.append("GET 响应关键字")
+                    break
+        except Exception as e:
+            logger.debug(f"  [-] GET 检测异常: {e}")
+
+        # 返回漏洞信息（置信度 >= 60%）
+        if confidence >= 0.60 and features_detected:
+            return Vulnerability(
+                vuln_name="ThinkPHP 应用检测",
+                payload_url=url,
+                severity=Severity.MEDIUM,
+                vuln_type=VulnType.INFORMATION_DISCLOSURE,
+                discovered_at=datetime.now().isoformat(),
+                confidence=min(confidence, 0.95),  # 限制最高 95%
+                description=f"检测方法: {', '.join(features_detected)}"
+            )
+
     except Exception as e:
-        logger.debug(f"  [-] ThinkPHP RCE检测失败: {e}")
+        logger.debug(f"  [-] ThinkPHP 检测失败: {e}")
 
     return None
 
