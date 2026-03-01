@@ -148,12 +148,59 @@ FINGERPRINTS = [
     {"name": "Vue.js", "location": "body", "keyword": "app.js", "weight": 0.40},
 ]
 
-# 全局风控状态（线程安全优化版）
-CONSECUTIVE_BLOCKS = 0
+# 全局风控状态管理器（线程安全实现）
+class WAFBackoffManager:
+    """
+    管理WAF防护检测和退避
+    [修复] 使用线程锁保护所有访问，防止TOCTOU竞态条件
+    """
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.backoff_until = 0  # Unix时间戳
+        self.consecutive_blocks = 0
+        self.dynamic_delay_base = Config.SMART_SLEEP_MIN
+
+    def record_block(self) -> None:
+        """记录一次阻止，如果达到阈值则触发退避"""
+        with self.lock:
+            self.consecutive_blocks += 1
+            if self.consecutive_blocks >= 3:
+                logger.warning(f"\n[!!!] 检测到WAF防护 (连续拦截{self.consecutive_blocks}次)，采用指数退避策略")
+                self.backoff_until = time.time() + 15
+                self.dynamic_delay_base = min(self.dynamic_delay_base + 0.5, 5.0)
+                self.consecutive_blocks = 0
+
+    def reset_blocks(self) -> None:
+        """正常响应时重置计数器"""
+        with self.lock:
+            self.consecutive_blocks = 0
+
+    def wait_if_backoff_active(self) -> None:
+        """如果退避活跃，等待相应时间"""
+        with self.lock:
+            if self.backoff_until > time.time():
+                wait_time = self.backoff_until - time.time()
+                if wait_time > 0:
+                    logger.warning(f"  [!] WAF退避中，等待 {wait_time:.1f}s")
+
+        # 实际睡眠在锁外进行，避免阻塞太久
+        with self.lock:
+            if self.backoff_until > time.time():
+                wait_time = self.backoff_until - time.time()
+                time.sleep(wait_time)
+
+    def get_dynamic_delay(self) -> float:
+        """获取当前动态延迟时间"""
+        with self.lock:
+            return self.dynamic_delay_base
+
+# 全局WAF管理器实例
+waf_manager = WAFBackoffManager()
+
+# 保持向后兼容的全局变量（通过管理器访问）
+CONSECUTIVE_BLOCKS = 0  # 已弃用，使用waf_manager代替
 DYNAMIC_DELAY_BASE = Config.SMART_SLEEP_MIN
 risk_lock = threading.Lock()
-# 优化: 使用Event和时间戳避免阻塞睡眠
-waf_backoff_until = 0  # Unix时间戳，标记WAF退避截止时间
 
 
 # ==========================================
@@ -438,6 +485,7 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
     """
     探测单个子域名：存活检测、指纹识别、漏洞验证
     P3-08改进：Circuit Breaker防止重复请求失败的端点
+    [修复] 使用线程安全的WAF管理器替换全局变量
 
     参数:
         subdomain: 要探测的子域名
@@ -447,8 +495,6 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
     返回:
         Asset对象（如果存活），否则None
     """
-    global CONSECUTIVE_BLOCKS, DYNAMIC_DELAY_BASE, waf_backoff_until
-
     if '@' in subdomain:
         return None
 
@@ -465,19 +511,13 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
         response = None
         for attempt in range(max_retries + 1):
             try:
-                # [新增] 检查全局WAF退避状态
-                # 如果其他线程触发了WAF防护，当前线程应主动暂停
-                if waf_backoff_until > time.time():
-                    wait_time = waf_backoff_until - time.time()
-                    if wait_time > 0:
-                        logger.warning(f"  [!] 全局WAF退避生效中，暂停 {wait_time:.1f}s ...")
-                        time.sleep(wait_time)
+                # [修复] 检查WAF退避状态（线程安全）
+                waf_manager.wait_if_backoff_active()
 
                 stealth_headers = get_stealth_headers()
 
-                # 动态延迟（带线程锁）
-                with risk_lock:
-                    current_delay = DYNAMIC_DELAY_BASE
+                # 动态延迟
+                current_delay = waf_manager.get_dynamic_delay()
                 smart_sleep(current_delay, current_delay + 0.6)
 
                 current_proxy = get_random_proxy()
@@ -552,20 +592,11 @@ def probe_subdomain(subdomain: str, wildcard_sig: Dict, max_retries: int = 2) ->
         elif response.encoding is None:
             response.encoding = 'utf-8'
 
-        # ===== 风控自适应（优化版：避免阻塞） =====
+        # ===== 风控自适应（使用线程安全管理器） =====
         if response.status_code in [403, 429]:
-            with risk_lock:
-                CONSECUTIVE_BLOCKS += 1
-                # 如果连续拦截>=3次，触发退避
-                if CONSECUTIVE_BLOCKS >= 3:
-                    logger.warning(f"\n[!!!] 检测到WAF防护 (连续拦截{CONSECUTIVE_BLOCKS}次)，采用指数退避策略")
-                    import time as t
-                    waf_backoff_until = t.time() + 15
-                    DYNAMIC_DELAY_BASE += 0.5
-                    CONSECUTIVE_BLOCKS = 0
+            waf_manager.record_block()
         else:
-            with risk_lock:
-                CONSECUTIVE_BLOCKS = 0
+            waf_manager.reset_blocks()
 
             # ===== 内容提取 =====
             content_length = len(response.content)

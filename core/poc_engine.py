@@ -558,24 +558,23 @@ def run_pocs(url: str, fingerprints: List[str]) -> List[Vulnerability]:
 def _execute_single_poc(url: str, poc_name: str, poc_func: Callable, timeout: int) -> Optional[Vulnerability]:
     """
     执行单个POC，带超时控制
+    [修复] 移除嵌套ThreadPoolExecutor，使用函数直接调用
+    否则会导致大量线程创建和内存泄漏
 
     参数:
         url: 目标URL
         poc_name: POC名称
         poc_func: POC函数
-        timeout: 超时时间
+        timeout: 超时时间 (秒)
 
     返回:
         Vulnerability对象或None
     """
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(poc_func, url)
-            result = future.result(timeout=timeout)
-            return result
-    except concurrent.futures.TimeoutError:
-        logger.debug(f"  [-] {poc_name} POC执行超时 ({timeout}s)")
-        return None
+        # 直接调用POC函数，不使用额外的ThreadPoolExecutor
+        # 超时是通过函数内部的smart_sleep和requests超时实现的
+        result = poc_func(url)
+        return result
     except Exception as e:
-        logger.debug(f"  [-] {poc_name} POC执行异常: {e}")
+        logger.debug(f"  [-] {poc_name} POC执行异常: {type(e).__name__}: {e}")
         return None

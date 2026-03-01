@@ -9,16 +9,96 @@ from pathlib import Path
 
 # 加载 .env 文件
 def _load_dotenv():
-    """加载.env文件到环境变量"""
+    """
+    加载.env文件到环境变量（带有验证）
+    仅允许白名单中的配置键，防止注入攻击
+    """
+    import re
+
+    # 允许的配置键白名单
+    ALLOWED_KEYS = {
+        # 基础设置
+        'THREADS', 'REQUEST_TIMEOUT', 'SMART_SLEEP_MIN', 'SMART_SLEEP_MAX',
+        # 子域名收集
+        'DNS_VERIFY', 'DNS_TIMEOUT',
+        # POC配置
+        'POC_TIMEOUT',
+        # 熔断器
+        'CIRCUIT_BREAKER_THRESHOLD', 'CIRCUIT_BREAKER_TIMEOUT',
+        # 反检测
+        'ENABLE_PROXY', 'PROXY_POOL',
+        # OOB配置
+        'OOB_ENABLED', 'OOB_PLATFORM', 'OOB_TIMEOUT', 'CEYE_TOKEN', 'CEYE_DOMAIN',
+        # 数据库
+        'DB_FILE', 'DB_POOL_SIZE', 'DB_TIMEOUT',
+        # 通知
+        'NOTIFY_ENABLED', 'NOTIFY_CHANNELS',
+        'TG_BOT_TOKEN', 'TG_CHAT_ID',
+        'DINGTALK_WEBHOOK', 'DINGTALK_SECRET', 'WECHAT_WEBHOOK',
+        'EMAIL_ENABLED', 'EMAIL_HOST', 'EMAIL_PORT', 'EMAIL_USER', 'EMAIL_PASSWORD', 'EMAIL_FROM', 'EMAIL_TO',
+        'NOTIFY_DEDUP_HOURS', 'NOTIFY_RATE_LIMIT', 'DEDUP_EXPIRE_DAYS', 'SMTP_POOL_SIZE',
+        # 输出
+        'OUTPUT_DIR', 'HTML_REPORT',
+        # 日志
+        'LOG_LEVEL', 'LOG_DIR', 'LOG_MAX_BYTES', 'LOG_BACKUP_COUNT',
+        # 断点续传
+        'CHECKPOINT_ENABLED', 'CHECKPOINT_DIR', 'CHECKPOINT_AUTO_SAVE_INTERVAL',
+        # SSL
+        'VERIFY_SSL',
+        # 高级选项
+        'DRY_RUN', 'DEBUG'
+    }
+
     env_file = Path(__file__).parent / ".env"
     if env_file.exists():
         try:
             with open(env_file, 'r', encoding='utf-8') as f:
-                for line in f:
+                for line_num, line in enumerate(f, 1):
                     line = line.strip()
-                    if line and not line.startswith('#') and '=' in line:
-                        key, value = line.split('=', 1)
-                        os.environ.setdefault(key.strip(), value.strip())
+                    # 跳过空行和注释
+                    if not line or line.startswith('#'):
+                        continue
+                    # 检查格式
+                    if '=' not in line:
+                        print(f"[!] .env 第 {line_num} 行格式错误，跳过")
+                        continue
+
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+
+                    # 检查键是否在白名单中
+                    if key not in ALLOWED_KEYS:
+                        print(f"[!] 未知配置键被忽略: {key}")
+                        continue
+
+                    # 基础值验证（防止明显的恶意值）
+                    if not value:
+                        print(f"[!] 配置 {key} 的值为空，被忽略")
+                        continue
+
+                    # 检查值是否包含可疑的shell程序
+                    if any(dangerous in value for dangerous in ['&&', '|', ';', '`', '$(']):
+                        print(f"[!] 配置 {key} 包含可疑字符，被忽略")
+                        continue
+
+                    # 数值类型配置的验证
+                    numeric_keys = {
+                        'THREADS', 'REQUEST_TIMEOUT', 'SMART_SLEEP_MIN', 'SMART_SLEEP_MAX',
+                        'DNS_TIMEOUT', 'POC_TIMEOUT', 'CIRCUIT_BREAKER_THRESHOLD',
+                        'CIRCUIT_BREAKER_TIMEOUT', 'OOB_TIMEOUT', 'DB_POOL_SIZE', 'DB_TIMEOUT',
+                        'LOG_MAX_BYTES', 'LOG_BACKUP_COUNT', 'CHECKPOINT_AUTO_SAVE_INTERVAL',
+                        'NOTIFY_DEDUP_HOURS', 'NOTIFY_RATE_LIMIT', 'DEDUP_EXPIRE_DAYS',
+                        'SMTP_POOL_SIZE', 'EMAIL_PORT'
+                    }
+
+                    if key in numeric_keys:
+                        if not re.match(r'^-?\d+(\.\d+)?$', value):
+                            print(f"[!] 配置 {key} 期望数值，得到: {value}")
+                            continue
+
+                    # 设置环境变量
+                    os.environ.setdefault(key, value)
         except Exception as e:
             print(f"[!] 加载.env文件失败: {e}")
 
