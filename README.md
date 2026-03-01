@@ -618,12 +618,9 @@ MIT License - 仅供安全研究和授权测试使用
 
 ## 📞 联系方式
 
-- 📧 Email: hours9527@gmail.com
+- 📧 Email: skyandeos@foxmail.com
 - 🐛 Bug 反馈: https://github.com/hours9527/AssetMonitor/issues
 - ✨ 功能建议: https://github.com/hours9527/AssetMonitor/discussions
 
 ---
 
-**最后更新**: 2026-02-28
-**项目版本**: v2.1 (Method A Enhanced)
-**代码质量**: 8.74/10 ⭐⭐⭐⭐
